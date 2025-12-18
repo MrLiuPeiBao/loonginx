@@ -1,0 +1,9 @@
+# Python
+venv/
+.venv/
+env/
+__pycache__/
+*.pyc
+
+# Windows
+venv_widows/
