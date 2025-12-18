@@ -1,0 +1,10 @@
+# Python
+server/venv/
+server/.venv/
+
+server/__pycache__/
+*.pyc
+
+# Windows
+server/venv_widows/
+server/venv_widows/ 
