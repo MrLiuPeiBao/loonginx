@@ -1,0 +1,6 @@
+server/venv_widows/
+server/venv/
+server/.venv/
+server/__pycache__
+server/.vscode
+server/.pytest_cache
