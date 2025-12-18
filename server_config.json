@@ -1,0 +1,8 @@
+{
+    "mqtt_broker": "localhost",
+    "mqtt_port": 1883,
+    "mqtt_username": "",
+    "mqtt_password": "",
+    "window_width": 1000,
+    "window_height": 700
+}
