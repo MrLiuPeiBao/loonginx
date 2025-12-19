@@ -42,6 +42,11 @@ PIP_INSTALL_TIMEOUT = _env_int('RUN_ALL_PIP_TIMEOUT', 60)
 PIP_INSTALL_RETRIES = os.getenv('RUN_ALL_PIP_RETRIES', '0')
 PIP_INSTALL_DEFAULT_TIMEOUT = os.getenv('RUN_ALL_PIP_DEFAULT_TIMEOUT', '5')
 
+
+def _is_conda_env() -> bool:
+    """Check if running in a conda environment."""
+    return bool(os.getenv('CONDA_DEFAULT_ENV') or os.getenv('CONDA_PREFIX'))
+
 def _read_pyvenv_cfg(path: Path) -> Dict[str, str]:
     """Read pyvenv.cfg as a simple key/value mapping."""
     values: Dict[str, str] = {}
@@ -122,6 +127,10 @@ def _repair_venv() -> bool:
 
 
 def _ensure_venv() -> None:
+    if _is_conda_env():
+        conda_env = os.getenv('CONDA_DEFAULT_ENV', 'unknown')
+        print(f'[INFO] Detected conda environment ({conda_env}), skipping venv creation.')
+        return
     if _venv_python_works():
         return
     if PYTHON_BIN.exists():
@@ -133,6 +142,11 @@ def _ensure_venv() -> None:
     subprocess.run([sys.executable, '-m', 'venv', '--clear', str(VENV_DIR)], check=True)
 
 
+def _get_python_executable() -> str:
+    """Get the Python executable to use (conda env or venv)."""
+    return sys.executable if _is_conda_env() else str(PYTHON_BIN)
+
+
 def _ensure_dependencies() -> None:
     requirements = ROOT / 'requirements.txt'
     if not requirements.exists():
@@ -142,6 +156,7 @@ def _ensure_dependencies() -> None:
         print('[WARN] Dependency installation skipped by env (SKIP_PIP_INSTALL/INSTALL_DEPENDENCIES)')
         return
     print('[INFO] Installing/upgrading dependencies ...')
+    python_exe = _get_python_executable()
     base_args = [
         '--retries',
         PIP_INSTALL_RETRIES,
@@ -149,12 +164,12 @@ def _ensure_dependencies() -> None:
         PIP_INSTALL_DEFAULT_TIMEOUT,
     ]
     if not _run_pip_command(
-        [str(PYTHON_BIN), '-m', 'pip', 'install', '--upgrade', 'pip', *base_args],
+        [python_exe, '-m', 'pip', 'install', '--upgrade', 'pip', *base_args],
         'pip upgrade',
     ):
         return
     _run_pip_command(
-        [str(PYTHON_BIN), '-m', 'pip', 'install', '-r', str(requirements), *base_args],
+        [python_exe, '-m', 'pip', 'install', '-r', str(requirements), *base_args],
         'dependency installation',
     )
 
@@ -190,10 +205,11 @@ def main() -> None:
     _ensure_dependencies()
 
     processes: List[subprocess.Popen] = []
+    python_exe = _get_python_executable()
     try:
         log_level = os.getenv('UVICORN_LOG_LEVEL', 'warning')
         uvicorn_cmd = [
-            str(PYTHON_BIN),
+            python_exe,
             '-m',
             'uvicorn',
             'main:app',
@@ -210,7 +226,7 @@ def main() -> None:
         _ensure_process_alive(fastapi_proc, 'FastAPI (uvicorn)')
 
         if GUI_ENABLED:
-            gui_cmd = [str(PYTHON_BIN), '-m', 'app.gui.app']
+            gui_cmd = [python_exe, '-m', 'app.gui.app']
             gui_proc = _start_process(gui_cmd, 'Monitoring GUI')
             processes.append(gui_proc)
             _ensure_process_alive(gui_proc, 'Monitoring GUI', delay=1.0)
