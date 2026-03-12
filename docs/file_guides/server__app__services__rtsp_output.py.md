@@ -1,0 +1,92 @@
+# 文件讲解：`server/app/services/rtsp_output.py`
+
+## 1. 文件定位
+- **角色**：业务/基础模块
+- **所在层级**：`server/app/services`
+- **是否建议新人优先阅读**：是
+- **模块文档摘要**：RTSP output helpers for YOLO annotated frames.
+
+## 2. 对外依赖与协作关系
+- **导入依赖（节选）**：
+  - `from __future__ import annotations`
+  - `logging`
+  - `subprocess`
+  - `threading`
+  - `time`
+  - `from dataclasses import dataclass`
+  - `from typing import Any, Optional`
+  - `from urllib.parse import urlparse`
+
+## 3. 核心模块与实现原理
+- **类设计**：
+  - `RtspOutputConfig`（继承：无）
+    - 作用：Configuration for RTSP output backends.
+    - 方法数量：0
+  - `RtspOutput`（继承：无）
+    - 作用：Abstract RTSP output interface.
+    - 方法数量：3
+    - `start(self)`
+      - 职责：Start the RTSP output backend.
+    - `stop(self)`
+      - 职责：Stop the RTSP output backend.
+    - `write_frame(self, frame: Any)`
+      - 职责：Write a single BGR frame.
+  - `NullRtspOutput`（继承：RtspOutput）
+    - 作用：No-op RTSP output implementation.
+    - 方法数量：3
+    - `start(self)`
+    - `stop(self)`
+    - `write_frame(self, frame: Any)`
+  - `FFmpegRtspOutput`（继承：RtspOutput）
+    - 作用：Push raw frames into FFmpeg for RTSP publishing.
+    - 方法数量：5
+    - `__init__(self, config: RtspOutputConfig)`
+      - 关键调用链：threading.Lock
+    - `start(self)`
+      - 关键调用链：logger.exception, logger.info, logger.warning, self._process.poll, str, subprocess.Popen
+    - `stop(self)`
+      - 关键调用链：self._terminate
+    - `write_frame(self, frame: Any)`
+      - 关键调用链：frame.tobytes, logger.warning, self._process.poll, self._terminate, stdin.write
+    - `_terminate(self)`
+      - 关键调用链：logger.debug, logger.info, proc.kill, proc.terminate, proc.wait, stdin.close
+  - `GStreamerRtspOutput`（继承：RtspOutput）
+    - 作用：Publish frames through an embedded GStreamer RTSP server.
+    - 方法数量：6
+    - `__init__(self, config: RtspOutputConfig)`
+      - 关键调用链：threading.Event, threading.Lock
+    - `start(self)`
+      - 关键调用链：GLib.MainLoop, Gst.init, GstRtspServer.RTSPMediaFactory, GstRtspServer.RTSPServer, _build_gst_launch, _parse_rtsp_url
+    - `stop(self)`
+      - 关键调用链：appsrc.emit, self._loop.quit, self._ready.clear, self._thread.is_alive, self._thread.join
+    - `write_frame(self, frame: Any)`
+      - 关键调用链：Gst.Buffer.new_allocate, Gst.util_uint64_scale_int, appsrc.emit, buffer.fill, frame.tobytes, len
+    - `_run_loop(self)`
+      - 关键调用链：logger.error, self._loop.run
+    - `_on_media_configure(self, _factory: Any, media: Any)`
+      - 关键调用链：Gst.Caps.from_string, _build_caps, appsrc.set_property, element.get_child_by_name, logger.debug, logger.warning
+- **函数设计**：
+  - `create_rtsp_output(config: RtspOutputConfig)`
+    - 功能：Create RTSP output backend based on config and availability.
+    - 实现原理：通过输入参数与模块状态计算结果，并组织 I/O、解析或编排逻辑。
+    - 依赖函数：FFmpegRtspOutput, GStreamerRtspOutput, logger.warning, lower, strip
+  - `_parse_rtsp_url(url: str)`
+    - 实现原理：通过输入参数与模块状态计算结果，并组织 I/O、解析或编排逻辑。
+    - 依赖函数：path.startswith, urlparse
+  - `_build_caps(config: RtspOutputConfig)`
+    - 实现原理：通过输入参数与模块状态计算结果，并组织 I/O、解析或编排逻辑。
+    - 依赖函数：max
+  - `_build_gst_launch(config: RtspOutputConfig)`
+    - 实现原理：通过输入参数与模块状态计算结果，并组织 I/O、解析或编排逻辑。
+    - 依赖函数：_build_caps, _build_encoder_props, _resolve_gst_encoder, join, max, parts.append, parts.extend
+  - `_resolve_gst_encoder(config: RtspOutputConfig)`
+    - 实现原理：通过输入参数与模块状态计算结果，并组织 I/O、解析或编排逻辑。
+    - 依赖函数：Gst.ElementFactory.find, logger.debug, logger.warning, strip
+  - `_build_encoder_props(config: RtspOutputConfig, encoder: str, keyint: int)`
+    - 实现原理：通过输入参数与模块状态计算结果，并组织 I/O、解析或编排逻辑。
+    - 依赖函数：join, pieces.append, strip
+
+## 4. 新人阅读建议（针对本文件）
+- 建议先看公开函数/类，再沿“关键调用链”逐跳进入下层模块。
+- 对 I/O 代码（MQTT、串口、DB）重点关注异常路径与重试策略。
+- 可结合对应测试文件验证你对边界条件的理解。
