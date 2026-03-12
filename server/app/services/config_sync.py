@@ -1,0 +1,94 @@
+"""配置下发与回执处理。"""
+
+from __future__ import annotations
+
+import json
+import logging
+from datetime import datetime
+from typing import TYPE_CHECKING, Dict
+
+from app.core.constants import MQTT_TOPICS
+from app.db.models import CommandDirection
+from app.services.data_service import DataService
+
+if TYPE_CHECKING:
+    from app.mqtt import MQTTMessageContext
+    from app.mqtt.client import MQTTManager
+
+logger = logging.getLogger(__name__)
+
+
+def build_config_update_payload(payload: Dict[str, object], version: int) -> Dict[str, object]:
+    return {
+        'version': int(version),
+        'payload': payload or {},
+        'timestamp': datetime.now().isoformat(),
+    }
+
+
+def build_device_hello(*, version: int) -> Dict[str, object]:
+    return {
+        'config_version': int(version),
+    }
+
+
+def publish_config_update(
+    mqtt_manager: "MQTTManager",
+    overrides: Dict[str, object],
+    *,
+    version: int,
+) -> bool:
+    payload = build_config_update_payload(overrides, version=version)
+    data = json.dumps(payload, ensure_ascii=False).encode('utf-8')
+    return mqtt_manager.publish(MQTT_TOPICS['config_update'], data)
+
+
+def handle_config_ack(context: "MQTTMessageContext") -> None:
+    payload = context.json() or {}
+    device_id = payload.get('device_id')
+    status = payload.get('status') or payload.get('result')
+    pending = payload.get('pending_restart_keys') or []
+    notes = f"config_ack status={status} pending={pending}"
+    logger.info('Config ack from %s: %s', device_id or 'unknown', notes)
+    try:
+        from app.db.session import session_scope
+
+        with session_scope() as session:
+            DataService(session).add_command_log(
+                timestamp=datetime.now(),
+                direction=CommandDirection.RESPONSE,
+                payload=json.dumps(payload, ensure_ascii=False),
+                notes=notes,
+                device_id=device_id,
+            )
+    except Exception:  # pragma: no cover - 依赖外部 DB
+        logger.exception('Failed to persist config ack')
+
+
+def handle_device_hello(context: "MQTTMessageContext", mqtt_manager: "MQTTManager") -> None:
+    payload = context.json() or {}
+    try:
+        device_version = int(payload.get('config_version') or 0)
+    except (TypeError, ValueError):
+        device_version = 0
+    try:
+        from app.db.session import session_scope
+        from app.services.runtime_config import get_runtime_config_row, load_runtime_overrides
+
+        with session_scope() as session:
+            row = get_runtime_config_row(session)
+            server_version = int(row.id) if row and row.id is not None else 0
+            if device_version == server_version:
+                return
+            overrides = load_runtime_overrides(session)
+    except Exception:
+        logger.exception('Failed to resolve runtime config for device hello')
+        return
+
+    published = publish_config_update(
+        mqtt_manager,
+        overrides,
+        version=server_version,
+    )
+    if not published:
+        logger.warning('Failed to publish config update for device hello')

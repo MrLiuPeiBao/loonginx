@@ -1,0 +1,144 @@
+{
+  "version": 1,
+  "items": {
+    "APP_NAME": [
+      "sensor_server"
+    ],
+    "API_HOST": [
+      "0.0.0.0"
+    ],
+    "API_PORT": [
+      "8000"
+    ],
+    "UVICORN_LOG_LEVEL": [
+      "info"
+    ],
+    "CORS_ALLOW_ORIGINS": [
+      "http://192.168.31.3:8080,http://localhost:8080,http://127.0.0.1:8080,http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173"
+    ],
+    "MQTT_BROKER": [
+      "localhost"
+    ],
+    "MQTT_PORT": [
+      "1883"
+    ],
+    "MQTT_USERNAME": [
+      "000000"
+    ],
+    "MYSQL_HOST": [
+      "localhost"
+    ],
+    "MYSQL_PORT": [
+      "3306"
+    ],
+    "MYSQL_USER": [
+      "root"
+    ],
+    "MYSQL_PASSWORD": [
+      "root"
+    ],
+    "MYSQL_DATABASE": [
+      "loognix"
+    ],
+    "YOLO_RTSP_INPUT": [
+      "rtsp://admin:HIKKBA12@192.168.31.64:554/Streaming/Channels/101"
+    ],
+    "YOLO_MODEL_PATH": [
+      "yolov8n.pt"
+    ],
+    "YOLO_DEVICE_ID": [
+      "camera-01"
+    ],
+    "YOLO_LOCATION": [
+      "gate-a"
+    ],
+    "YOLO_SCREENSHOT_INTERVAL": [
+      "5.0"
+    ],
+    "YOLO_CONFIDENCE_THRESHOLD": [
+      "0.35"
+    ],
+    "YOLO_FRAME_HEIGHT": [
+      "360"
+    ],
+    "YOLO_FRAME_WIDTH": [
+      "640"
+    ],
+    "YOLO_FPS": [
+      "20"
+    ],
+    "YOLO_RTSP_CAPTURE_OPTIONS": [
+      "rtsp_transport;tcp|fflags;nobuffer|flags;low_delay|max_delay;0|probesize;32|analyzeduration;0"
+    ],
+    "YOLO_GST_ENCODER_PROPS": [
+      "preset=p1 tune=ultra-low-latency rc-mode=cbr bitrate=2000 gop-size=20 rc-lookahead=0 zerolatency=true"
+    ],
+    "YOLO_GST_ENCODER": [
+      "nvh264enc"
+    ],
+    "YOLO_CAPTURE_BUFFER_SIZE": [
+      "1"
+    ],
+    "YOLO_DROP_MAX_FRAMES": [
+      "10"
+    ],
+    "YOLO_DETECTION_INTERVAL": [
+      "5.0"
+    ],
+    "YOLO_PERSON_CONFIDENCE": [
+      "0.5"
+    ],
+    "YOLO_TRACKER_CONFIG": [
+      "bytetrack.yaml"
+    ],
+    "AUDIO_RTSP_INPUT": [
+      "rtsp://127.0.0.1:8554/audio",
+      "rtsp://admin:HIKKBA12@192.168.31.64:554/Streaming/Channels/101"
+    ],
+    "AUDIO_DEVICE_ID": [
+      "mic-01"
+    ],
+    "AUDIO_LOCATION": [
+      "gate-a"
+    ],
+    "AUDIO_SAMPLE_RATE": [
+      "16000"
+    ],
+    "AUDIO_WINDOW_SECONDS": [
+      "1.0"
+    ],
+    "AUDIO_THRESHOLD_CENTROID": [
+      "0.0"
+    ],
+    "AUDIO_THRESHOLD_BANDWIDTH": [
+      "0.0"
+    ],
+    "AUDIO_THRESHOLD_ROLLOFF": [
+      "0.0"
+    ],
+    "AUDIO_THRESHOLD_FLATNESS": [
+      "0.0"
+    ],
+    "AUDIO_THRESHOLD_FLUX": [
+      "0.0"
+    ],
+    "AUDIO_THRESHOLD_RMS": [
+      "0.0"
+    ],
+    "MEDIA_STORAGE_DIR": [
+      "media"
+    ],
+    "DATA_RETENTION_CHECK_INTERVAL_SECONDS": [
+      "3600"
+    ],
+    "DATA_RETENTION_DAYS": [
+      "0"
+    ],
+    "DATA_RETENTION_MAX_GB": [
+      "0.0"
+    ],
+    "COMMAND_TIMEOUT_SECONDS": [
+      "15"
+    ]
+  }
+}

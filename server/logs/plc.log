@@ -1,0 +1,6 @@
+[PLC] 2026-01-28 17:57:16,302 INFO plc.app.api.routes: Cableway command request type=control device_id=None request_id=gui-1769594031801
+[PLC] 2026-01-28 17:57:16,302 DEBUG plc.app.api.routes: Cableway command payload={"schema": 1, "type": "control", "timestamp": "2026-01-28T09:57:16", "pulse": true, "request_id": "gui-1769594031801", "command_code": 201}
+[PLC] 2026-01-28 17:57:16,329 INFO plc.app.api.routes: Cableway command published topic=cableway/command/request
+[PLC] 2026-01-28 17:57:21,193 INFO plc.app.api.routes: Cableway command request type=control device_id=None request_id=gui-1769594236370
+[PLC] 2026-01-28 17:57:21,193 DEBUG plc.app.api.routes: Cableway command payload={"schema": 1, "type": "control", "timestamp": "2026-01-28T09:57:21", "pulse": true, "request_id": "gui-1769594236370", "command_code": 202}
+[PLC] 2026-01-28 17:57:21,216 INFO plc.app.api.routes: Cableway command published topic=cableway/command/request
