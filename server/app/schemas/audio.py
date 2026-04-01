@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Optional
+from typing import List, Optional
 
 from sqlmodel import SQLModel
 
@@ -28,3 +28,10 @@ class AudioDataRead(AudioDataBase):
     """读取音频数据。"""
 
     id: int
+
+
+class AudioDataPage(SQLModel):
+    """带总条数的音频分页响应。"""
+
+    total: int
+    items: List[AudioDataRead]

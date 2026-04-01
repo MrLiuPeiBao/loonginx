@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+import json
 import subprocess
 import sys
 import tempfile
@@ -115,6 +116,7 @@ class AudioMonitorService:
         self._lock = threading.Lock()
         self._last_spectral_warning_at = 0.0
         self._last_thresholds_zero_warning_at = 0.0
+        self._metrics_path = Path(__file__).resolve().parents[2] / 'logs' / 'audio_metrics.json'
 
     @property
     def enabled(self) -> bool:
@@ -218,6 +220,7 @@ class AudioMonitorService:
                 with self._lock:
                     self._metrics.append(metrics)
                     self._last_window = metrics
+                self._persist_metrics_snapshot()
                 logger.debug(
                     'Audio evaluation metrics=%s exceeded=%s',
                     metrics,
@@ -506,7 +509,10 @@ class AudioMonitorService:
     # API helpers ---------------------------------------------------------
     def get_metrics(self, limit: int = 100) -> list[Dict[str, float]]:
         with self._lock:
-            return list(self._metrics)[-limit:]
+            cached = list(self._metrics)[-limit:]
+        if cached:
+            return cached
+        return self._load_persisted_metrics(limit=limit)
 
     def update_thresholds(self, **kwargs: float) -> None:
         """Update in-memory thresholds.
@@ -654,3 +660,31 @@ class AudioMonitorService:
         if now - last >= interval:
             logger.warning(message)
             setattr(self, attr, now)
+
+    def _persist_metrics_snapshot(self) -> None:
+        """Persist recent metrics so the API process can read them in process mode."""
+        try:
+            self._metrics_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = self._metrics_path.with_suffix('.tmp')
+            with self._lock:
+                payload = list(self._metrics)
+            with tmp_path.open('w', encoding='utf-8') as handle:
+                json.dump(payload, handle, ensure_ascii=False)
+            os.replace(tmp_path, self._metrics_path)
+        except Exception:
+            logger.debug('Failed to persist audio metrics snapshot', exc_info=True)
+
+    def _load_persisted_metrics(self, *, limit: int) -> list[Dict[str, float]]:
+        """Load worker-persisted metrics when this process has no in-memory samples."""
+        try:
+            if not self._metrics_path.exists():
+                return []
+            with self._metrics_path.open('r', encoding='utf-8') as handle:
+                payload = json.load(handle)
+        except Exception:
+            logger.debug('Failed to load persisted audio metrics snapshot', exc_info=True)
+            return []
+        if not isinstance(payload, list):
+            return []
+        rows = [row for row in payload if isinstance(row, dict)]
+        return rows[-limit:]

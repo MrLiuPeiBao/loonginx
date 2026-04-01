@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from sqlmodel import Session, select
-from sqlalchemy import delete, text
+from sqlalchemy import delete, func, text
 
 from app.db.models import (
     AlarmRecord,
@@ -162,6 +162,25 @@ class DataService:
         if offset:
             statement = statement.offset(offset)
         return list(self.session.exec(statement))
+
+    def count_sensor_data(
+        self,
+        *,
+        start: Optional[datetime] = None,
+        end: Optional[datetime] = None,
+        device_id: Optional[str] = None,
+        location: Optional[str] = None,
+    ) -> int:
+        statement = select(func.count()).select_from(SensorData)
+        if start:
+            statement = statement.where(SensorData.timestamp >= start)
+        if end:
+            statement = statement.where(SensorData.timestamp <= end)
+        if device_id:
+            statement = statement.where(SensorData.device_id == device_id)
+        if location:
+            statement = statement.where(SensorData.location == location)
+        return int(self.session.exec(statement).one() or 0)
 
     # ------------------------------------------------------------------
     # BMS data
@@ -321,6 +340,22 @@ class DataService:
             statement = statement.offset(offset)
         return list(self.session.exec(statement))
 
+    def count_alarm_records(
+        self,
+        *,
+        start: Optional[datetime] = None,
+        end: Optional[datetime] = None,
+        handled: Optional[bool] = None,
+    ) -> int:
+        statement = select(func.count()).select_from(AlarmRecord)
+        if start:
+            statement = statement.where(AlarmRecord.timestamp >= start)
+        if end:
+            statement = statement.where(AlarmRecord.timestamp <= end)
+        if handled is not None:
+            statement = statement.where(AlarmRecord.is_handled == handled)
+        return int(self.session.exec(statement).one() or 0)
+
     def create_alarm_record(self, entity: AlarmRecord) -> AlarmRecord:
         self.session.add(entity)
         self.session.flush()
@@ -387,7 +422,7 @@ class DataService:
         if existing:
             existing.command_type = command_type or existing.command_type
             existing.device_id = device_id or existing.device_id
-            if request_payload:
+            if request_payload is not None:
                 existing.request_payload = request_payload
             existing.status = status
             existing.updated_at = now
@@ -433,10 +468,12 @@ class DataService:
         else:
             existing.status = status
             existing.updated_at = now
-            if response_payload:
+            if response_payload is not None:
                 existing.response_payload = response_payload
-            if error:
+            if error is not None:
                 existing.error = error
+            elif status == CommandStatus.ACK:
+                existing.error = None
             if device_id:
                 existing.device_id = device_id
 
@@ -522,6 +559,25 @@ class DataService:
             statement = statement.offset(offset)
         return list(self.session.exec(statement))
 
+    def count_image_data(
+        self,
+        *,
+        start: Optional[datetime] = None,
+        end: Optional[datetime] = None,
+        device_id: Optional[str] = None,
+        location: Optional[str] = None,
+    ) -> int:
+        statement = select(func.count()).select_from(ImageData)
+        if start:
+            statement = statement.where(ImageData.timestamp >= start)
+        if end:
+            statement = statement.where(ImageData.timestamp <= end)
+        if device_id:
+            statement = statement.where(ImageData.device_id == device_id)
+        if location:
+            statement = statement.where(ImageData.location == location)
+        return int(self.session.exec(statement).one() or 0)
+
     def create_audio_data(self, items: Iterable[AudioData], *, commit: bool = True) -> List[AudioData]:
         settings = get_settings()
         use_fs = settings.media_storage_mode == 'filesystem' and settings.media_store_audio
@@ -558,6 +614,25 @@ class DataService:
             statement = statement.offset(offset)
         return list(self.session.exec(statement))
 
+    def count_audio_data(
+        self,
+        *,
+        start: Optional[datetime] = None,
+        end: Optional[datetime] = None,
+        device_id: Optional[str] = None,
+        location: Optional[str] = None,
+    ) -> int:
+        statement = select(func.count()).select_from(AudioData)
+        if start:
+            statement = statement.where(AudioData.timestamp >= start)
+        if end:
+            statement = statement.where(AudioData.timestamp <= end)
+        if device_id:
+            statement = statement.where(AudioData.device_id == device_id)
+        if location:
+            statement = statement.where(AudioData.location == location)
+        return int(self.session.exec(statement).one() or 0)
+
     def create_metal_anomaly(self, items: Iterable[MetalAnomaly]) -> List[MetalAnomaly]:
         return self._persist_entities(items)
 
@@ -585,6 +660,25 @@ class DataService:
         if offset:
             statement = statement.offset(offset)
         return list(self.session.exec(statement))
+
+    def count_metal_anomaly(
+        self,
+        *,
+        start: Optional[datetime] = None,
+        end: Optional[datetime] = None,
+        device_id: Optional[str] = None,
+        location: Optional[str] = None,
+    ) -> int:
+        statement = select(func.count()).select_from(MetalAnomaly)
+        if start:
+            statement = statement.where(MetalAnomaly.timestamp >= start)
+        if end:
+            statement = statement.where(MetalAnomaly.timestamp <= end)
+        if device_id:
+            statement = statement.where(MetalAnomaly.device_id == device_id)
+        if location:
+            statement = statement.where(MetalAnomaly.location == location)
+        return int(self.session.exec(statement).one() or 0)
 
     # ------------------------------------------------------------------
     # Internal helpers

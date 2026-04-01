@@ -1,5 +1,7 @@
 param(
     [string]$EnvName = "sensor_server",
+    [string]$CondaExe = "",
+    [string]$PythonExe = "",
     [string]$RtspHost = "127.0.0.1",
     [int]$Port = 8554,
     [string]$Mount = "/audio",
@@ -13,15 +15,61 @@ param(
     [switch]$Help
 )
 
+$ErrorActionPreference = 'Stop'
+
 if ($Help) {
-    Write-Host "Usage: powershell -ExecutionPolicy Bypass -File \"server/scripts/rtsp_audio_server.ps1\" -Source \"sine\""
+    Write-Host 'Usage: powershell -ExecutionPolicy Bypass -File "server/scripts/rtsp_audio_server.ps1" -Source "sine"'
     return
 }
 
+function Resolve-CondaCommand {
+    param([string]$PreferredPath)
+
+    $candidates = [System.Collections.Generic.List[string]]::new()
+    if ($PreferredPath) {
+        $candidates.Add($PreferredPath)
+    }
+    if ($env:CONDA_EXE) {
+        $candidates.Add($env:CONDA_EXE)
+    }
+
+    $command = Get-Command "conda" -ErrorAction SilentlyContinue
+    if ($command -and $command.Source) {
+        $candidates.Add($command.Source)
+    }
+
+    foreach ($base in @(
+        "$env:USERPROFILE\anaconda3",
+        "$env:USERPROFILE\Anaconda3",
+        "$env:USERPROFILE\miniconda3",
+        "$env:USERPROFILE\Miniconda3"
+    )) {
+        $candidates.Add((Join-Path $base 'Scripts\conda.exe'))
+        $candidates.Add((Join-Path $base 'condabin\conda.bat'))
+    }
+
+    foreach ($candidate in $candidates) {
+        if (-not $candidate) {
+            continue
+        }
+        if (Test-Path $candidate) {
+            return (Resolve-Path $candidate).Path
+        }
+    }
+
+    return ""
+}
+
 function Get-CondaPythonPath {
-    param([string]$Name)
+    param(
+        [string]$Name,
+        [string]$CondaCommand
+    )
+    if (-not $CondaCommand) {
+        return ""
+    }
     try {
-        $pythonPath = & conda run -n "$Name" python -c "import sys; print(sys.executable)"
+        $pythonPath = & $CondaCommand run -n "$Name" python -c "import sys; print(sys.executable)"
         if ($LASTEXITCODE -ne 0) {
             return ""
         }
@@ -54,9 +102,25 @@ function Get-CondaPathEntries {
     )
 }
 
-$pythonPath = Get-CondaPythonPath -Name $EnvName
+$resolvedPython = ""
+if ($PythonExe) {
+    if (-not (Test-Path $PythonExe)) {
+        Write-Error "Python executable not found: $PythonExe"
+        exit 1
+    }
+    $resolvedPython = (Resolve-Path $PythonExe).Path
+} else {
+    $resolvedConda = Resolve-CondaCommand -PreferredPath $CondaExe
+    if (-not $resolvedConda) {
+        Write-Error "Failed to resolve conda. Please add it to PATH, pass -CondaExe, or pass -PythonExe."
+        exit 1
+    }
+    $resolvedPython = Get-CondaPythonPath -Name $EnvName -CondaCommand $resolvedConda
+}
+
+$pythonPath = $resolvedPython
 if (-not $pythonPath) {
-    Write-Error "Failed to resolve conda python for env: $EnvName"
+    Write-Error "Failed to resolve python for env: $EnvName"
     exit 1
 }
 $pythonPath = $pythonPath -replace '\\', '/'

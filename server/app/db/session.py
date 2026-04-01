@@ -58,6 +58,7 @@ def init_db() -> None:
     _ensure_alarm_table_schema()
     _ensure_image_table_schema()
     _ensure_audio_table_schema()
+    _ensure_command_table_schema()
     _ensure_runtime_config_schema()
 
 
@@ -162,6 +163,51 @@ def _ensure_audio_table_schema() -> None:
                 logger.info('Expanded audio_data column to LONGBLOB')
             except Exception:  # pragma: no cover - 依赖数据源
                 logger.exception('Failed to expand audio_data column to LONGBLOB')
+
+
+def _ensure_command_table_schema() -> None:
+    """Ensure command tables can store full request/response payloads."""
+    try:
+        inspector = inspect(engine)
+        command_log_columns = {col['name']: col for col in inspector.get_columns('command_logs')}
+        command_request_columns = {col['name']: col for col in inspector.get_columns('command_requests')}
+    except Exception:  # pragma: no cover - 依赖数据源
+        logger.exception('Failed to inspect command tables')
+        return
+
+    payload_column = command_log_columns.get('payload')
+    if payload_column:
+        type_str = str(payload_column.get('type') or '').lower()
+        needs_expand = True
+        if 'varchar' in type_str:
+            try:
+                current_size = int(type_str.split('varchar(')[1].split(')')[0])
+                needs_expand = current_size < 700
+            except Exception:
+                needs_expand = True
+        if needs_expand:
+            try:
+                with engine.begin() as connection:
+                    connection.exec_driver_sql("ALTER TABLE command_logs MODIFY payload VARCHAR(700) NOT NULL")
+                logger.info('Expanded command_logs.payload to VARCHAR(700)')
+            except Exception:  # pragma: no cover - 依赖数据源
+                logger.exception('Failed to expand command_logs.payload')
+
+    for column_name in ('request_payload', 'response_payload'):
+        column = command_request_columns.get(column_name)
+        if not column:
+            continue
+        type_str = str(column.get('type') or '').lower()
+        if 'text' in type_str:
+            continue
+        try:
+            with engine.begin() as connection:
+                connection.exec_driver_sql(
+                    f"ALTER TABLE command_requests MODIFY {column_name} LONGTEXT NULL"
+                )
+            logger.info('Expanded command_requests.%s to LONGTEXT', column_name)
+        except Exception:  # pragma: no cover - 依赖数据源
+            logger.exception('Failed to expand command_requests.%s', column_name)
 
 
 def _ensure_runtime_config_schema() -> None:

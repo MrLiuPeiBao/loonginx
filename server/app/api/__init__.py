@@ -71,6 +71,8 @@ def create_app() -> FastAPI:
         payload_hex = _bytes_to_hex(context.payload)
         payload_text = None
         payload_json = None
+        request_id = None
+        success = None
         try:
             payload_text = context.payload.decode('utf-8')
             payload_json = json.loads(payload_text)

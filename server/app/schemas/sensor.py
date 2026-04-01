@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Optional
+from typing import List, Optional
 
 from sqlmodel import SQLModel
 
@@ -34,3 +34,10 @@ class SensorDataRead(SensorDataBase):
     """读取传感器数据。"""
 
     id: int
+
+
+class SensorDataPage(SQLModel):
+    """带总条数的传感器分页响应。"""
+
+    total: int
+    items: List[SensorDataRead]

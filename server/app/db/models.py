@@ -12,6 +12,7 @@ from sqlalchemy.dialects.mysql import LONGBLOB, LONGTEXT
 
 AUDIO_DATA_STORAGE_TYPE = LargeBinary().with_variant(LONGBLOB(), 'mysql')
 CONFIG_JSON_STORAGE_TYPE = Text().with_variant(LONGTEXT(), 'mysql')
+COMMAND_TEXT_STORAGE_TYPE = Text().with_variant(LONGTEXT(), 'mysql')
 
 
 class SensorTypeEnum(str, Enum):
@@ -214,7 +215,7 @@ class CommandLog(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     timestamp: datetime = Field(default_factory=datetime.now, nullable=False)
     direction: CommandDirection = Field(nullable=False)
-    payload: str = Field(nullable=False)
+    payload: str = Field(max_length=700, nullable=False)
     notes: Optional[str] = Field(default=None, max_length=255)
     device_id: Optional[str] = Field(default=None, max_length=50)
 
@@ -243,6 +244,6 @@ class CommandRequestState(SQLModel, table=True):
     command_type: str = Field(default='generic', max_length=32)
     status: CommandStatus = Field(default=CommandStatus.SENT, nullable=False)
     device_id: Optional[str] = Field(default=None, max_length=50)
-    request_payload: Optional[str] = Field(default=None)
-    response_payload: Optional[str] = Field(default=None)
+    request_payload: Optional[str] = Field(default=None, sa_column=Column(COMMAND_TEXT_STORAGE_TYPE))
+    response_payload: Optional[str] = Field(default=None, sa_column=Column(COMMAND_TEXT_STORAGE_TYPE))
     error: Optional[str] = Field(default=None, max_length=255)

@@ -43,20 +43,19 @@ from app.db.models import (
     SensorData,
 )
 from app.db.session import db_ping, get_session, rebuild_engine
-from app.schemas.alarm import AlarmRecordCreate, AlarmRecordRead
-from app.schemas.audio import AudioDataCreate, AudioDataRead
+from app.schemas.alarm import AlarmRecordCreate, AlarmRecordPage, AlarmRecordRead
+from app.schemas.audio import AudioDataCreate, AudioDataPage, AudioDataRead
 from app.db.audio_thresholds import AudioThreshold
 from app.schemas.bms import BMSDataCreate, BMSDataRead
 from app.schemas.cableway import CablewayCommandRequest, CablewayStatusRead
 from app.schemas.command import CommandLogRead, CommandRequest, CommandRequestStatusRead
 from app.schemas.config import SensorConfigCreate, SensorConfigRead
-from app.schemas.image import ImageDataCreate, ImageDataRead
-from app.schemas.metal import MetalAnomalyCreate, MetalAnomalyRead
+from app.schemas.image import ImageDataCreate, ImageDataPage, ImageDataRead
+from app.schemas.metal import MetalAnomalyCreate, MetalAnomalyPage, MetalAnomalyRead
 from app.schemas.rfid import RFIDDataCreate, RFIDDataRead
-from app.schemas.sensor import SensorDataCreate, SensorDataRead
+from app.schemas.sensor import SensorDataCreate, SensorDataPage, SensorDataRead
 from app.services.data_service import DataService
 from app.services.alarm_publisher import build_alarm_event, publish_alarm_event
-from app.services.alarm_cache import get_latest_alarm
 from app.services.bms_alerts import maybe_create_bms_low_voltage_alarm
 from app.services.bms_cache import get_latest_bms, set_latest_bms
 from app.services.cableway_cache import get_latest_cableway_status as get_cached_cableway_status
@@ -651,7 +650,7 @@ def health_ready(request: Request, settings: Settings = Depends(get_settings)) -
     return JSONResponse(status_code=503, content=payload)
 
 
-@router.get('/sensors', response_model=List[SensorDataRead])
+@router.get('/sensors', response_model=SensorDataPage)
 def list_sensor_data(
     start: Optional[str] = Query(default=None, description='起始时间，ISO8601'),
     end: Optional[str] = Query(default=None, description='结束时间，ISO8601'),
@@ -660,21 +659,18 @@ def list_sensor_data(
     limit: Optional[int] = Query(default=None, ge=1, le=1000, description='返回数量上限'),
     offset: int = Query(default=0, ge=0, description='分页偏移量'),
     data_service: DataService = Depends(get_data_service),
-) -> List[SensorData]:
+) -> SensorDataPage:
     """查询传感器数据。"""
-    if limit == 1 and offset == 0 and start is None and end is None:
-        cached = get_latest_sensor()
-        if cached:
-            cached_device = cached.get('device_id')
-            cached_location = cached.get('location')
-            if (device_id is None or device_id == cached_device) and (
-                location is None or location == cached_location
-            ):
-                return [SensorDataRead(**cached)]
     start_at = _parse_datetime(start, 'start')
     end_at = _parse_datetime(end, 'end')
     start_at, end_at, limit = _apply_default_query_window(start_at, end_at, limit)
-    return data_service.list_sensor_data(
+    total = data_service.count_sensor_data(
+        start=start_at,
+        end=end_at,
+        device_id=device_id,
+        location=location,
+    )
+    items = data_service.list_sensor_data(
         start=start_at,
         end=end_at,
         device_id=device_id,
@@ -682,6 +678,7 @@ def list_sensor_data(
         limit=limit,
         offset=offset,
     )
+    return SensorDataPage(total=total, items=items)
 
 
 @router.post('/sensors', response_model=List[SensorDataRead], status_code=status.HTTP_201_CREATED)
@@ -1245,7 +1242,7 @@ def delete_sensor_config(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Config not found')
 
 
-@router.get('/alarms', response_model=List[AlarmRecordRead])
+@router.get('/alarms', response_model=AlarmRecordPage)
 def list_alarm_records(
     start: Optional[str] = Query(default=None, description='起始时间，ISO8601'),
     end: Optional[str] = Query(default=None, description='结束时间，ISO8601'),
@@ -1253,28 +1250,24 @@ def list_alarm_records(
     limit: Optional[int] = Query(default=None, ge=1, le=1000, description='返回数量上限'),
     offset: int = Query(default=0, ge=0, description='分页偏移量'),
     data_service: DataService = Depends(get_data_service),
-) -> List[AlarmRecord]:
+) -> AlarmRecordPage:
     """查询报警记录。"""
-    if (
-        limit == 1
-        and offset == 0
-        and start is None
-        and end is None
-        and handled is None
-    ):
-        cached = get_latest_alarm()
-        if cached:
-            return [AlarmRecordRead(**cached)]
     start_at = _parse_datetime(start, 'start')
     end_at = _parse_datetime(end, 'end')
     handled_flag = _parse_bool(handled, 'handled')
-    return data_service.list_alarm_records(
+    total = data_service.count_alarm_records(
+        start=start_at,
+        end=end_at,
+        handled=handled_flag,
+    )
+    items = data_service.list_alarm_records(
         start=start_at,
         end=end_at,
         handled=handled_flag,
         limit=limit,
         offset=offset,
     )
+    return AlarmRecordPage(total=total, items=items)
 
 
 @router.post('/alarms', response_model=AlarmRecordRead, status_code=status.HTTP_201_CREATED)
@@ -1321,7 +1314,7 @@ def create_alarm_record_api(
     return stored
 
 
-@router.get('/images', response_model=List[ImageDataRead])
+@router.get('/images', response_model=ImageDataPage)
 def list_image_data(
     start: Optional[str] = Query(default=None, description='起始时间，ISO8601'),
     end: Optional[str] = Query(default=None, description='结束时间，ISO8601'),
@@ -1330,10 +1323,16 @@ def list_image_data(
     limit: Optional[int] = Query(default=None, ge=1, le=1000, description='返回数量上限'),
     offset: int = Query(default=0, ge=0, description='分页偏移量'),
     data_service: DataService = Depends(get_data_service),
-) -> List[ImageDataRead]:
+) -> ImageDataPage:
     """查询图像数据。"""
     start_at = _parse_datetime(start, 'start')
     end_at = _parse_datetime(end, 'end')
+    total = data_service.count_image_data(
+        start=start_at,
+        end=end_at,
+        device_id=device_id,
+        location=location,
+    )
     rows = data_service.list_image_data(
         start=start_at,
         end=end_at,
@@ -1342,7 +1341,7 @@ def list_image_data(
         limit=limit,
         offset=offset,
     )
-    return [
+    items = [
         ImageDataRead(
             id=row.id or 0,
             timestamp=row.timestamp,
@@ -1353,6 +1352,7 @@ def list_image_data(
         )
         for row in rows
     ]
+    return ImageDataPage(total=total, items=items)
 
 
 @router.post('/images', response_model=List[ImageDataRead], status_code=status.HTTP_201_CREATED)
@@ -1370,7 +1370,7 @@ def create_image_data(
     return data_service.create_image_data(entities)
 
 
-@router.get('/audio', response_model=List[AudioDataRead])
+@router.get('/audio', response_model=AudioDataPage)
 def list_audio_data(
     start: Optional[str] = Query(default=None, description='起始时间，ISO8601'),
     end: Optional[str] = Query(default=None, description='结束时间，ISO8601'),
@@ -1379,10 +1379,16 @@ def list_audio_data(
     limit: Optional[int] = Query(default=None, ge=1, le=1000, description='返回数量上限'),
     offset: int = Query(default=0, ge=0, description='分页偏移量'),
     data_service: DataService = Depends(get_data_service),
-) -> List[AudioDataRead]:
+) -> AudioDataPage:
     """查询音频数据。"""
     start_at = _parse_datetime(start, 'start')
     end_at = _parse_datetime(end, 'end')
+    total = data_service.count_audio_data(
+        start=start_at,
+        end=end_at,
+        device_id=device_id,
+        location=location,
+    )
     rows = data_service.list_audio_data(
         start=start_at,
         end=end_at,
@@ -1391,7 +1397,7 @@ def list_audio_data(
         limit=limit,
         offset=offset,
     )
-    return [
+    items = [
         AudioDataRead(
             id=row.id or 0,
             timestamp=row.timestamp,
@@ -1402,6 +1408,7 @@ def list_audio_data(
         )
         for row in rows
     ]
+    return AudioDataPage(total=total, items=items)
 
 
 @router.post('/audio', response_model=List[AudioDataRead], status_code=status.HTTP_201_CREATED)
@@ -1490,7 +1497,7 @@ def stream_audio_metrics(
     return metrics[-1] if metrics else {}
 
 
-@router.get('/metal-anomaly', response_model=List[MetalAnomalyRead])
+@router.get('/metal-anomaly', response_model=MetalAnomalyPage)
 def list_metal_anomaly(
     start: Optional[str] = Query(default=None, description='起始时间，ISO8601'),
     end: Optional[str] = Query(default=None, description='结束时间，ISO8601'),
@@ -1499,11 +1506,17 @@ def list_metal_anomaly(
     limit: Optional[int] = Query(default=None, ge=1, le=1000, description='返回数量上限'),
     offset: int = Query(default=0, ge=0, description='分页偏移量'),
     data_service: DataService = Depends(get_data_service),
-) -> List[MetalAnomaly]:
+) -> MetalAnomalyPage:
     """查询金属异常记录。"""
     start_at = _parse_datetime(start, 'start')
     end_at = _parse_datetime(end, 'end')
-    return data_service.list_metal_anomaly(
+    total = data_service.count_metal_anomaly(
+        start=start_at,
+        end=end_at,
+        device_id=device_id,
+        location=location,
+    )
+    items = data_service.list_metal_anomaly(
         start=start_at,
         end=end_at,
         device_id=device_id,
@@ -1511,6 +1524,7 @@ def list_metal_anomaly(
         limit=limit,
         offset=offset,
     )
+    return MetalAnomalyPage(total=total, items=items)
 
 
 @router.post('/metal-anomaly', response_model=List[MetalAnomalyRead], status_code=status.HTTP_201_CREATED)

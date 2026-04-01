@@ -15,6 +15,11 @@ server/scripts/conda_run.ps1 -EnvName "sensor_server" -Mode "stack"
 ```bat
 server/scripts/conda_run.bat "sensor_server" "stack"
 ```
+> 本地 RTSP 音频联调：
+> - 当 `.env` 中 `AUDIO_ENABLED=true` 且 `AUDIO_RTSP_INPUT` 为 `rtsp://127.0.0.1:8554/audio` 或 `rtsp://localhost:8554/audio` 时，`server/scripts/conda_run.ps1` 会自动启动 `server/scripts/rtsp_audio_server.ps1`。
+> - 如果 `conda` 不在 PATH 中，可给 `server/scripts/conda_run.ps1` 传入 `-CondaExe "C:\Users\...\anaconda3\Scripts\conda.exe"`，或先设置环境变量 `CONDA_EXE`。
+> - 如需临时关闭该行为，可添加 `-SkipLocalRtspAudio`。
+> - 可选的启动器专用 `.env` 键：`AUDIO_RTSP_SIM_SOURCE`、`AUDIO_RTSP_SIM_FILE`、`AUDIO_RTSP_SIM_LOOP`、`AUDIO_RTSP_SIM_FREQ`、`AUDIO_RTSP_SIM_SAMPLE_RATE`、`AUDIO_RTSP_SIM_CHANNELS`。
 说明：
 - 脚本会统一设置窗口为 UTF-8 输出，避免 API/GUI/MQTT 窗口乱码。
 - GUI 外部播放依赖 `ffplay`，默认优先使用 Conda 环境内的 `ffplay.exe`，若不存在则使用系统 PATH 中的 `ffplay`。
@@ -28,6 +33,9 @@ conda run -n sensor_server python -m uvicorn main:app --reload --host 0.0.0.0 --
 2) 上位机 MQTT 订阅 → 解析 → 入库 → 判断阈值 → 统一发布告警。
 3) API/GUI 可以查询历史数据与当前状态。
 4) 命令下发：API → MQTT → 下位机执行 → 回执 → 上位机记录状态。
+
+历史分页接口补充：
+- `/api/sensors`、`/api/alarms`、`/api/images`、`/api/audio`、`/api/metal-anomaly` 返回 `{ "total": 总条数, "items": 当前页数据 }`，便于前端显示分页总数。
 
 ## 4. 配置说明（`.env`）
 - `MQTT_*`：MQTT 连接信息
@@ -85,3 +93,20 @@ conda run -n sensor_server python -m uvicorn main:app --reload --host 0.0.0.0 --
 - **为什么需要数据保留？** 避免数据库无限增长，保证长期稳定运行。
 - **DB 不可用怎么办？** 上位机会发布降级告警，不阻塞 MQTT 消费。
 - **媒体存库还是落盘？** 现场资源紧张建议 `filesystem`。
+
+## 9. 虚拟 Client 联调脚本
+- 适用场景：没有下位机硬件时，在开发机上持续模拟 MQTT 上报、命令回执、配置回执，以及图片/音频/金属异常等数据。
+- 脚本位置：`server/scripts/virtual_client.py`
+- 推荐启动方式（使用 Conda 环境）：
+```powershell
+conda run -n sensor_server python "server/scripts/virtual_client.py"
+```
+- 常用参数：
+  - `--mqtt-broker localhost --mqtt-port 1883`：指定 Broker
+  - `--api-base-url http://127.0.0.1:8000/api`：指定上位机 API
+  - `--duration-seconds 60`：只运行一段时间后自动退出，便于自测
+  - `--no-http-seed`：只模拟 MQTT，不通过 HTTP 补充图片/音频/金属异常
+- 脚本默认会：
+  - 周期发布 `sensors/data`、`sensors/bms`、`sensors/rfid`、`cableway/status`、`device/hello`
+  - 订阅并响应 `sensors/command/request`、`cableway/command/request`、`config/update`
+  - 通过 API 初始化传感器阈值，并写入示例图片、音频、金属异常数据

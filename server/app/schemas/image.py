@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Optional
+from typing import List, Optional
 
 from sqlmodel import SQLModel
 
@@ -28,3 +28,10 @@ class ImageDataRead(ImageDataBase):
     """读取图像数据。"""
 
     id: int
+
+
+class ImageDataPage(SQLModel):
+    """带总条数的图像分页响应。"""
+
+    total: int
+    items: List[ImageDataRead]

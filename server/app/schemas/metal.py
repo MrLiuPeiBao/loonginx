@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import List
 
 from sqlmodel import SQLModel
 
@@ -25,3 +26,10 @@ class MetalAnomalyRead(MetalAnomalyBase):
     """读取金属异常记录。"""
 
     id: int
+
+
+class MetalAnomalyPage(SQLModel):
+    """带总条数的金属异常分页响应。"""
+
+    total: int
+    items: List[MetalAnomalyRead]

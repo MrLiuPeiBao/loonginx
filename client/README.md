@@ -21,6 +21,9 @@ python3.9 "main.py"
 4) 接收上位机控制命令 → 串口/PLC 执行 → 回执上报。
 5) MQTT 断连时可离线缓存；断连过久自动进入降频模式，降低资源消耗。
 
+对接提示：
+- 上位机历史查询接口 `/api/sensors`、`/api/alarms`、`/api/images`、`/api/audio`、`/api/metal-anomaly` 返回 `{ "total": 总条数, "items": 当前页数据 }`。
+
 ## 4. 配置说明（`client/.env`）
 > 以下为常用项，实际以 `client/config.py` 为准。
 

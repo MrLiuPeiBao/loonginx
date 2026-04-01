@@ -1,0 +1,20 @@
+flowchart LR
+  subgraph Field[现场网络]
+    PLC[PLC 索道控制柜]
+    Sensors[RS485 传感器]
+    RFID[RFID 读卡器]
+    Client[下位机设备 loongarch64]
+  end
+
+  subgraph Control[机房/控制端]
+    Broker[MQTT Broker]
+    Server[上位机 FastAPI GUI]
+    DB[(MySQL)]
+  end
+
+  Sensors -- RS485 --> Client
+  RFID -- 串口 --> Client
+  PLC -- Modbus TCP --> Client
+  Client -- MQTT --> Broker
+  Broker -- MQTT --> Server
+  Server -- SQL --> DB

@@ -1,0 +1,45 @@
+.worktrees/
+.spec-workflow/
+.vscode/
+.idea/
+
+# Python caches and virtual environments
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage*
+.venv/
+venv/
+venv_*/
+server/.venv/
+client/.venv/
+
+# Local runtime state
+*.log
+*.out
+*.err
+*.pid
+*.db
+*.sqlite
+*.sqlite3
+server/logs/
+client/logs/
+
+# Local configuration and secrets
+.env
+.env.*
+server/.env
+client/.env
+
+# Windows metadata
+*.Zone.Identifier
+*Zone.Identifier*
+
+# Generated artifacts
+server/scripts/__pycache__/
+server/tests/__pycache__/
+client/tests/__pycache__/

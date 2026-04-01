@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Optional
+from typing import List, Optional
 
 from sqlmodel import SQLModel
 
@@ -40,3 +40,10 @@ class AlarmRecordCreate(SQLModel):
     alarm_type: AlarmType
     is_handled: bool = False
     location: str = ''
+
+
+class AlarmRecordPage(SQLModel):
+    """带总条数的报警分页响应。"""
+
+    total: int
+    items: List[AlarmRecordRead]

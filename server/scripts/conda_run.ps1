@@ -3,6 +3,8 @@ param(
     [string]$Mode = 'stack',
     [string]$EnvName = 'sensor_server',
     [string]$MySqlServiceName = 'MySQL80',
+    [string]$CondaExe = '',
+    [switch]$SkipLocalRtspAudio,
     [switch]$Help
 )
 
@@ -17,6 +19,8 @@ Parameters:
   -EnvName            Conda environment name (default: sensor_server)
   -Mode               stack | api | gui | mqtt
   -MySqlServiceName   Windows service name for MySQL (default: MySQL80)
+  -CondaExe           Optional path to conda.exe/conda.bat
+  -SkipLocalRtspAudio Do not auto-start the local RTSP audio simulator
 "@
     return
 }
@@ -24,6 +28,44 @@ Parameters:
 function Write-Step {
     param([string]$Message)
     Write-Host "[conda_run] $Message"
+}
+
+function Resolve-CondaCommand {
+    param([string]$PreferredPath)
+
+    $candidates = [System.Collections.Generic.List[string]]::new()
+    if ($PreferredPath) {
+        $candidates.Add($PreferredPath)
+    }
+    if ($env:CONDA_EXE) {
+        $candidates.Add($env:CONDA_EXE)
+    }
+
+    $command = Get-Command "conda" -ErrorAction SilentlyContinue
+    if ($command -and $command.Source) {
+        $candidates.Add($command.Source)
+    }
+
+    foreach ($base in @(
+        "$env:USERPROFILE\anaconda3",
+        "$env:USERPROFILE\Anaconda3",
+        "$env:USERPROFILE\miniconda3",
+        "$env:USERPROFILE\Miniconda3"
+    )) {
+        $candidates.Add((Join-Path $base 'Scripts\conda.exe'))
+        $candidates.Add((Join-Path $base 'condabin\conda.bat'))
+    }
+
+    foreach ($candidate in $candidates) {
+        if (-not $candidate) {
+            continue
+        }
+        if (Test-Path $candidate) {
+            return (Resolve-Path $candidate).Path
+        }
+    }
+
+    return ''
 }
 
 function Get-EnvValue {
@@ -64,8 +106,7 @@ function Get-EnvValue {
 }
 
 function Test-CondaAvailable {
-    $cmd = Get-Command "conda" -ErrorAction SilentlyContinue
-    return [bool]$cmd
+    return [bool]$script:CondaCommand
 }
 
 function Test-CondaEnv {
@@ -75,8 +116,11 @@ function Test-CondaEnv {
 
 function Get-CondaPythonPath {
     param([string]$Name)
+    if (-not $script:CondaCommand) {
+        return ''
+    }
     try {
-        $pythonPath = & conda run -n "$Name" python -c "import sys; print(sys.executable)"
+        $pythonPath = & $script:CondaCommand run -n "$Name" python -c "import sys; print(sys.executable)"
         if ($LASTEXITCODE -ne 0) {
             return ''
         }
@@ -207,14 +251,97 @@ function Start-ServerWindow {
     Write-Step "Started $Title window."
 }
 
+function Get-BoolEnvValue {
+    param(
+        [string]$Path,
+        [string]$Key,
+        [bool]$DefaultValue = $false
+    )
+
+    $defaultText = if ($DefaultValue) { 'true' } else { 'false' }
+    $value = (Get-EnvValue -Path $Path -Key $Key -DefaultValue $defaultText).Trim().ToLowerInvariant()
+    switch ($value) {
+        '1' { return $true }
+        'true' { return $true }
+        'yes' { return $true }
+        'on' { return $true }
+        '0' { return $false }
+        'false' { return $false }
+        'no' { return $false }
+        'off' { return $false }
+        default { return $DefaultValue }
+    }
+}
+
+function Test-LoopbackHost {
+    param([string]$HostName)
+    if (-not $HostName) {
+        return $false
+    }
+    return @('127.0.0.1', 'localhost', '::1') -contains $HostName.Trim().ToLowerInvariant()
+}
+
+function Get-LocalRtspEndpoint {
+    param([string]$Url)
+    if (-not $Url) {
+        return $null
+    }
+    try {
+        $uri = [System.Uri]$Url
+    } catch {
+        return $null
+    }
+    if ($uri.Scheme -ne 'rtsp') {
+        return $null
+    }
+    if (-not (Test-LoopbackHost -HostName $uri.Host)) {
+        return $null
+    }
+    $port = if ($uri.IsDefaultPort) { 554 } else { $uri.Port }
+    $mount = if ($uri.AbsolutePath) { $uri.AbsolutePath } else { '/' }
+    return [pscustomobject]@{
+        Host = $uri.Host
+        Port = $port
+        Mount = $mount
+    }
+}
+
+function Test-TcpEndpointListening {
+    param(
+        [string]$HostName,
+        [int]$Port,
+        [int]$TimeoutMs = 800
+    )
+
+    $client = New-Object System.Net.Sockets.TcpClient
+    $async = $null
+    try {
+        $async = $client.BeginConnect($HostName, $Port, $null, $null)
+        if (-not $async.AsyncWaitHandle.WaitOne($TimeoutMs, $false)) {
+            return $false
+        }
+        $client.EndConnect($async) | Out-Null
+        return $true
+    } catch {
+        return $false
+    } finally {
+        if ($async -and $async.AsyncWaitHandle) {
+            $async.AsyncWaitHandle.Close()
+        }
+        $client.Close()
+    }
+}
+
 $serverRoot = Resolve-Path (Join-Path $PSScriptRoot '..')
 $serverRootPath = $serverRoot.Path -replace '\\', '/'
 $envPath = Join-Path $serverRoot.Path ".env"
 
 Write-Step "Server root: $serverRootPath"
 
+$script:CondaCommand = Resolve-CondaCommand -PreferredPath $CondaExe
+
 if (-not (Test-CondaAvailable)) {
-    Write-Error "conda not found in PATH. Please enable conda first."
+    Write-Error "conda not found. Please add it to PATH or pass -CondaExe."
     exit 1
 }
 
@@ -234,6 +361,14 @@ $envPathPrefix = (Get-CondaPathEntries -Prefix $envPrefix) -join ';'
 
 $apiHost = Get-EnvValue -Path $envPath -Key "API_HOST" -DefaultValue "0.0.0.0"
 $apiPort = Get-EnvValue -Path $envPath -Key "API_PORT" -DefaultValue "8000"
+$audioEnabled = Get-BoolEnvValue -Path $envPath -Key "AUDIO_ENABLED" -DefaultValue $false
+$audioRtspInput = Get-EnvValue -Path $envPath -Key "AUDIO_RTSP_INPUT" -DefaultValue ""
+$audioRtspSource = Get-EnvValue -Path $envPath -Key "AUDIO_RTSP_SIM_SOURCE" -DefaultValue "sine"
+$audioRtspFile = Get-EnvValue -Path $envPath -Key "AUDIO_RTSP_SIM_FILE" -DefaultValue ""
+$audioRtspLoop = Get-BoolEnvValue -Path $envPath -Key "AUDIO_RTSP_SIM_LOOP" -DefaultValue $false
+$audioRtspFreq = Get-EnvValue -Path $envPath -Key "AUDIO_RTSP_SIM_FREQ" -DefaultValue "1000"
+$audioRtspSampleRate = Get-EnvValue -Path $envPath -Key "AUDIO_RTSP_SIM_SAMPLE_RATE" -DefaultValue "16000"
+$audioRtspChannels = Get-EnvValue -Path $envPath -Key "AUDIO_RTSP_SIM_CHANNELS" -DefaultValue "1"
 
 Write-Step "API host: $apiHost"
 Write-Step "API port: $apiPort"
@@ -280,6 +415,32 @@ if ($startMqtt) {
         Start-ServerWindow -Title "MQTT" -Command $mqttCommand -WorkingDirectory $serverRootPath -EnvPrefix $envPrefix -EnvPathPrefix $envPathPrefix
     } else {
         Write-Warning "mosquitto not found in conda env. MQTT broker not started."
+    }
+}
+
+$shouldEnsureLocalRtspAudio = (-not $SkipLocalRtspAudio) -and ($startApi -or $startGui) -and $audioEnabled
+if ($shouldEnsureLocalRtspAudio) {
+    $localRtspEndpoint = Get-LocalRtspEndpoint -Url $audioRtspInput
+    if ($localRtspEndpoint) {
+        if (Test-TcpEndpointListening -HostName $localRtspEndpoint.Host -Port $localRtspEndpoint.Port) {
+            Write-Step "Local RTSP audio endpoint already listening: $audioRtspInput"
+        } else {
+            $rtspScriptPath = (Join-Path $PSScriptRoot 'rtsp_audio_server.ps1') -replace '\\', '/'
+            if (Test-Path $rtspScriptPath) {
+                $rtspCommand = "& `"$rtspScriptPath`" -EnvName `"$EnvName`" -PythonExe `"$pythonPath`" -RtspHost `"$($localRtspEndpoint.Host)`" -Port $($localRtspEndpoint.Port) -Mount `"$($localRtspEndpoint.Mount)`" -Source `"$audioRtspSource`" -Freq $audioRtspFreq -SampleRate $audioRtspSampleRate -Channels $audioRtspChannels"
+                if ($audioRtspFile) {
+                    $safeFile = ($audioRtspFile -replace '"', '""')
+                    $rtspCommand += " -File `"$safeFile`""
+                }
+                if ($audioRtspLoop) {
+                    $rtspCommand += " -Loop"
+                }
+                Start-ServerWindow -Title "RTSP Audio" -Command $rtspCommand -WorkingDirectory $serverRootPath -EnvPrefix $envPrefix -EnvPathPrefix $envPathPrefix
+                Start-Sleep -Seconds 2
+            } else {
+                Write-Warning "Local RTSP audio script not found: $rtspScriptPath"
+            }
+        }
     }
 }
 

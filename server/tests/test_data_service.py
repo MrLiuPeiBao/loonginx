@@ -7,7 +7,7 @@ from datetime import datetime
 import pytest
 from sqlmodel import select
 
-from app.db.models import AlarmRecord, AlarmType, SensorConfig, SensorData
+from app.db.models import AlarmRecord, AlarmType, CommandStatus, SensorConfig, SensorData
 from app.services.data_service import DataService
 
 
@@ -99,3 +99,31 @@ def test_threshold_deduplication_by_timestamp(session) -> None:
     alarm = alarms[0]
     assert alarm.value == pytest.approx(stored_sensor.temperature)
     assert alarm.alarm_type == AlarmType.HIGH
+
+
+def test_update_command_request_status_clears_timeout_error(session) -> None:
+    """ACK updates should overwrite the timeout marker and keep the response payload."""
+    service = DataService(session)
+    service.upsert_command_request(
+        request_id="req-1",
+        command_type="generic",
+        device_id="dev-1",
+        request_payload="01 03 00 00",
+        status=CommandStatus.SENT,
+    )
+    service.update_command_request_status(
+        request_id="req-1",
+        status=CommandStatus.TIMEOUT,
+        error="timeout",
+    )
+
+    updated = service.update_command_request_status(
+        request_id="req-1",
+        status=CommandStatus.ACK,
+        response_payload='{"success": true}',
+        error=None,
+    )
+
+    assert updated.status == CommandStatus.ACK
+    assert updated.response_payload == '{"success": true}'
+    assert updated.error is None

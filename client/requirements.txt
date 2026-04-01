@@ -1,0 +1,6 @@
+# Third-party runtime dependencies inferred from imports in the client codebase.
+# Keep versions conservative for Python 3.9 and older board environments.
+
+pyserial>=3.5,<4.0
+minimalmodbus>=2.0,<3.0
+paho-mqtt>=1.6,<2.0

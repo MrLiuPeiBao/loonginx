@@ -1,0 +1,26 @@
+flowchart LR
+  subgraph Client[下位机]
+    Sensors[传感器/BMS/RFID/PLC]
+    ClientApp[采集与封装]
+    Offline[离线缓存/降频策略]
+  end
+  Broker[MQTT Broker]
+  subgraph Server[上位机]
+    MqttIn[MQTT 消息分发]
+    Ingest[解析/入库/告警/命令闭环]
+    Retention[数据保留清理]
+    DB[(MySQL)]
+    MediaFS[(媒体文件存储)]
+    API[HTTP API]
+    GUI[GUI]
+  end
+
+  Sensors --> ClientApp
+  ClientApp --> Offline --> Broker
+  Broker --> MqttIn --> Ingest --> DB
+  Ingest -.告警.-> Broker
+  Ingest -.可选.-> MediaFS
+  API --> Ingest
+  GUI --> API
+  Retention --> DB
+  Ingest --> Retention

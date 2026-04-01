@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 import time
 from dataclasses import dataclass
@@ -55,7 +56,8 @@ class MQTTManager:
         self._last_disconnect: Optional[tuple[int, float]] = None
 
     def _build_client(self, settings: Settings) -> mqtt.Client:
-        client = mqtt.Client(client_id=settings.app_name or 'sensor_server')
+        base_client_id = (settings.app_name or 'sensor_server').strip() or 'sensor_server'
+        client = mqtt.Client(client_id=f'{base_client_id}-{os.getpid()}')
         client.enable_logger(logger)
         client.reconnect_delay_set(min_delay=5, max_delay=60)
         username = settings.mqtt_username
