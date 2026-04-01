@@ -46,18 +46,24 @@ from app.db.session import db_ping, get_session, rebuild_engine
 from app.schemas.alarm import AlarmRecordCreate, AlarmRecordPage, AlarmRecordRead
 from app.schemas.audio import AudioDataCreate, AudioDataPage, AudioDataRead
 from app.db.audio_thresholds import AudioThreshold
-from app.schemas.bms import BMSDataCreate, BMSDataRead
-from app.schemas.cableway import CablewayCommandRequest, CablewayStatusRead
-from app.schemas.command import CommandLogRead, CommandRequest, CommandRequestStatusRead
+from app.schemas.bms import BMSDataCreate, BMSDataPage, BMSDataRead
+from app.schemas.cableway import CablewayCommandRequest, CablewayStatusPage, CablewayStatusRead
+from app.schemas.command import (
+    CommandLogPage,
+    CommandLogRead,
+    CommandRequest,
+    CommandRequestStatusPage,
+    CommandRequestStatusRead,
+)
 from app.schemas.config import SensorConfigCreate, SensorConfigRead
 from app.schemas.image import ImageDataCreate, ImageDataPage, ImageDataRead
 from app.schemas.metal import MetalAnomalyCreate, MetalAnomalyPage, MetalAnomalyRead
-from app.schemas.rfid import RFIDDataCreate, RFIDDataRead
+from app.schemas.rfid import RFIDDataCreate, RFIDDataPage, RFIDDataRead
 from app.schemas.sensor import SensorDataCreate, SensorDataPage, SensorDataRead
 from app.services.data_service import DataService
 from app.services.alarm_publisher import build_alarm_event, publish_alarm_event
 from app.services.bms_alerts import maybe_create_bms_low_voltage_alarm
-from app.services.bms_cache import get_latest_bms, set_latest_bms
+from app.services.bms_cache import set_latest_bms
 from app.services.cableway_cache import get_latest_cableway_status as get_cached_cableway_status
 from app.services.cableway_specs import validate_control_command_code, validate_param_updates
 from app.services.media_storage import load_file_base64
@@ -717,7 +723,7 @@ def latest_sensor_data(
     return data_service.list_sensor_data(limit=limit)
 
 
-@router.get('/bms', response_model=List[BMSDataRead])
+@router.get('/bms', response_model=BMSDataPage)
 def list_bms_data(
     start: Optional[str] = Query(default=None, description='起始时间，ISO8601'),
     end: Optional[str] = Query(default=None, description='结束时间，ISO8601'),
@@ -725,22 +731,24 @@ def list_bms_data(
     limit: Optional[int] = Query(default=None, ge=1, le=1000, description='返回数量上限'),
     offset: int = Query(default=0, ge=0, description='分页偏移量'),
     data_service: DataService = Depends(get_data_service),
-) -> List[BMSData]:
+) -> BMSDataPage:
     """查询 BMS 数据。"""
-    if limit == 1 and offset == 0 and start is None and end is None:
-        cached = get_latest_bms()
-        if cached and (device_id is None or device_id == cached.get('device_id')):
-            return [BMSDataRead(**cached)]
     start_at = _parse_datetime(start, 'start')
     end_at = _parse_datetime(end, 'end')
     start_at, end_at, limit = _apply_default_query_window(start_at, end_at, limit)
-    return data_service.list_bms_data(
+    total = data_service.count_bms_data(
+        start=start_at,
+        end=end_at,
+        device_id=device_id,
+    )
+    items = data_service.list_bms_data(
         start=start_at,
         end=end_at,
         device_id=device_id,
         limit=limit,
         offset=offset,
     )
+    return BMSDataPage(total=total, items=items)
 
 
 @router.post('/bms', response_model=List[BMSDataRead], status_code=status.HTTP_201_CREATED)
@@ -768,7 +776,7 @@ def create_bms_data(
     return stored
 
 
-@router.get('/rfid', response_model=List[RFIDDataRead])
+@router.get('/rfid', response_model=RFIDDataPage)
 def list_rfid_data(
     start: Optional[str] = Query(default=None, description='起始时间，ISO8601'),
     end: Optional[str] = Query(default=None, description='结束时间，ISO8601'),
@@ -776,22 +784,24 @@ def list_rfid_data(
     limit: Optional[int] = Query(default=None, ge=1, le=1000, description='返回数量上限'),
     offset: int = Query(default=0, ge=0, description='分页偏移量'),
     data_service: DataService = Depends(get_data_service),
-) -> List[RFIDData]:
+) -> RFIDDataPage:
     """查询 RFID 数据。"""
-    if limit == 1 and offset == 0 and start is None and end is None:
-        cached = get_latest_rfid()
-        if cached and (device_id is None or device_id == cached.device_id):
-            return [RFIDDataRead(**asdict(cached))]
     start_at = _parse_datetime(start, 'start')
     end_at = _parse_datetime(end, 'end')
     start_at, end_at, limit = _apply_default_query_window(start_at, end_at, limit)
-    return data_service.list_rfid_data(
+    total = data_service.count_rfid_data(
+        start=start_at,
+        end=end_at,
+        device_id=device_id,
+    )
+    items = data_service.list_rfid_data(
         start=start_at,
         end=end_at,
         device_id=device_id,
         limit=limit,
         offset=offset,
     )
+    return RFIDDataPage(total=total, items=items)
 
 
 @router.get('/rfid/latest', response_model=RFIDDataRead)
@@ -825,16 +835,18 @@ def create_rfid_data(
     return stored
 
 
-@router.get('/commands', response_model=List[CommandLogRead])
+@router.get('/commands', response_model=CommandLogPage)
 def list_command_logs(
     direction: Optional[str] = Query(default=None, description='命令方向 request/response'),
     limit: Optional[int] = Query(default=50, ge=1, le=1000, description='返回数量上限'),
     offset: int = Query(default=0, ge=0, description='分页偏移量'),
     data_service: DataService = Depends(get_data_service),
-) -> List[CommandLog]:
+) -> CommandLogPage:
     """查询命令日志。"""
     direction_enum = _parse_direction(direction)
-    return data_service.list_command_logs(direction=direction_enum, limit=limit, offset=offset)
+    total = data_service.count_command_logs(direction=direction_enum)
+    items = data_service.list_command_logs(direction=direction_enum, limit=limit, offset=offset)
+    return CommandLogPage(total=total, items=items)
 
 
 @router.post('/commands', status_code=status.HTTP_202_ACCEPTED)
@@ -884,7 +896,7 @@ def send_command(
     }
 
 
-@router.get('/cableway/status', response_model=List[CablewayStatusRead])
+@router.get('/cableway/status', response_model=CablewayStatusPage)
 def list_cableway_status(
     start: Optional[str] = Query(default=None, description='起始时间，ISO8601'),
     end: Optional[str] = Query(default=None, description='结束时间，ISO8601'),
@@ -892,21 +904,23 @@ def list_cableway_status(
     limit: Optional[int] = Query(default=50, ge=1, le=1000, description='返回数量上限'),
     offset: int = Query(default=0, ge=0, description='分页偏移量'),
     data_service: DataService = Depends(get_data_service),
-) -> List[CablewayStatus]:
+) -> CablewayStatusPage:
     """查询索道 PLC 状态历史。"""
-    if limit == 1 and offset == 0 and start is None and end is None:
-        cached = get_cached_cableway_status()
-        if cached and (device_id is None or device_id == cached.get('device_id')):
-            return [CablewayStatusRead(**cached)]
     start_at = _parse_datetime(start, 'start')
     end_at = _parse_datetime(end, 'end')
-    return data_service.list_cableway_status(
+    total = data_service.count_cableway_status(
+        start=start_at,
+        end=end_at,
+        device_id=device_id,
+    )
+    items = data_service.list_cableway_status(
         start=start_at,
         end=end_at,
         device_id=device_id,
         limit=limit,
         offset=offset,
     )
+    return CablewayStatusPage(total=total, items=items)
 
 
 @router.get('/cableway/status/latest', response_model=CablewayStatusRead)
@@ -1035,22 +1049,27 @@ def send_cableway_command(
     }
 
 
-@router.get('/command-requests', response_model=List[CommandRequestStatusRead])
+@router.get('/command-requests', response_model=CommandRequestStatusPage)
 def list_command_requests(
     status: Optional[str] = Query(default=None, description='命令状态 sent/ack/failed/timeout'),
     device_id: Optional[str] = Query(default=None, description='设备编号'),
     limit: Optional[int] = Query(default=50, ge=1, le=1000, description='返回数量上限'),
     offset: int = Query(default=0, ge=0, description='分页偏移量'),
     data_service: DataService = Depends(get_data_service),
-) -> List[CommandRequestState]:
+) -> CommandRequestStatusPage:
     """查询命令请求状态。"""
     status_enum = _parse_command_status(status)
-    return data_service.list_command_requests(
+    total = data_service.count_command_requests(
+        status=status_enum,
+        device_id=device_id,
+    )
+    items = data_service.list_command_requests(
         status=status_enum,
         device_id=device_id,
         limit=limit,
         offset=offset,
     )
+    return CommandRequestStatusPage(total=total, items=items)
 
 
 @router.get('/command-requests/{request_id}', response_model=CommandRequestStatusRead)

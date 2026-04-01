@@ -21,6 +21,13 @@ class CommandLogRead(SQLModel):
     device_id: Optional[str] = None
 
 
+class CommandLogPage(SQLModel):
+    """带总条数的命令日志分页响应。"""
+
+    total: int
+    items: List[CommandLogRead]
+
+
 class CommandRequest(SQLModel):
     """命令发送请求。"""
 
@@ -42,3 +49,10 @@ class CommandRequestStatusRead(SQLModel):
     request_payload: Optional[str] = None
     response_payload: Optional[str] = None
     error: Optional[str] = None
+
+
+class CommandRequestStatusPage(SQLModel):
+    """带总条数的命令请求状态分页响应。"""
+
+    total: int
+    items: List[CommandRequestStatusRead]

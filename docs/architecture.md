@@ -145,7 +145,7 @@ flowchart LR
 - 告警：`/api/alarms`
 
 分页响应补充：
-- `/api/sensors`、`/api/alarms`、`/api/images`、`/api/audio`、`/api/metal-anomaly` 返回 `{ "total": 总条数, "items": 当前页数据 }`，便于 GUI 和前端展示总条数。
+- `/api/sensors`、`/api/bms`、`/api/rfid`、`/api/commands`、`/api/cableway/status`、`/api/command-requests`、`/api/alarms`、`/api/images`、`/api/audio`、`/api/metal-anomaly` 返回 `{ "total": 总条数, "items": 当前页数据 }`，便于 GUI 和前端展示总条数。
 
 ## 8. 数据与告警
 - 传感器阈值超限、BMS 低压、音频/YOLO 事件等统一发布到 `sensors/alarms`。

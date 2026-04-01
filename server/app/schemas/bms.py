@@ -33,3 +33,10 @@ class BMSDataRead(BMSDataBase):
     """读取 BMS 数据。"""
 
     id: int
+
+
+class BMSDataPage(SQLModel):
+    """带总条数的 BMS 分页响应。"""
+
+    total: int
+    items: List[BMSDataRead]

@@ -1391,6 +1391,8 @@ class MonitoringGUI:
             raise RuntimeError(f'Invalid JSON returned by {url}') from exc
         if isinstance(data, list):
             return data
+        if isinstance(data, dict) and isinstance(data.get('items'), list):
+            return data['items']
         return []
 
     def _update_tree(

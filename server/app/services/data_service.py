@@ -210,6 +210,22 @@ class DataService:
             statement = statement.offset(offset)
         return list(self.session.exec(statement))
 
+    def count_bms_data(
+        self,
+        *,
+        start: Optional[datetime] = None,
+        end: Optional[datetime] = None,
+        device_id: Optional[str] = None,
+    ) -> int:
+        statement = select(func.count()).select_from(BMSData)
+        if start:
+            statement = statement.where(BMSData.timestamp >= start)
+        if end:
+            statement = statement.where(BMSData.timestamp <= end)
+        if device_id:
+            statement = statement.where(BMSData.device_id == device_id)
+        return int(self.session.exec(statement).one() or 0)
+
     # ------------------------------------------------------------------
     # RFID data
     # ------------------------------------------------------------------
@@ -237,6 +253,22 @@ class DataService:
         if offset:
             statement = statement.offset(offset)
         return list(self.session.exec(statement))
+
+    def count_rfid_data(
+        self,
+        *,
+        start: Optional[datetime] = None,
+        end: Optional[datetime] = None,
+        device_id: Optional[str] = None,
+    ) -> int:
+        statement = select(func.count()).select_from(RFIDData)
+        if start:
+            statement = statement.where(RFIDData.timestamp >= start)
+        if end:
+            statement = statement.where(RFIDData.timestamp <= end)
+        if device_id:
+            statement = statement.where(RFIDData.device_id == device_id)
+        return int(self.session.exec(statement).one() or 0)
 
     def get_latest_rfid_card(self) -> Optional[str]:
         """Return the newest RFID card_id if present."""
@@ -272,6 +304,22 @@ class DataService:
         if offset:
             statement = statement.offset(offset)
         return list(self.session.exec(statement))
+
+    def count_cableway_status(
+        self,
+        *,
+        start: Optional[datetime] = None,
+        end: Optional[datetime] = None,
+        device_id: Optional[str] = None,
+    ) -> int:
+        statement = select(func.count()).select_from(CablewayStatus)
+        if start:
+            statement = statement.where(CablewayStatus.timestamp >= start)
+        if end:
+            statement = statement.where(CablewayStatus.timestamp <= end)
+        if device_id:
+            statement = statement.where(CablewayStatus.device_id == device_id)
+        return int(self.session.exec(statement).one() or 0)
 
     def get_latest_cableway_status(self, *, device_id: Optional[str] = None) -> Optional[CablewayStatus]:
         statement = select(CablewayStatus).order_by(CablewayStatus.timestamp.desc()).limit(1)
@@ -405,6 +453,16 @@ class DataService:
             statement = statement.offset(offset)
         return list(self.session.exec(statement))
 
+    def count_command_logs(
+        self,
+        *,
+        direction: Optional[CommandDirection] = None,
+    ) -> int:
+        statement = select(func.count()).select_from(CommandLog)
+        if direction:
+            statement = statement.where(CommandLog.direction == direction)
+        return int(self.session.exec(statement).one() or 0)
+
     # ------------------------------------------------------------------
     # Command request state machine
     # ------------------------------------------------------------------
@@ -499,6 +557,19 @@ class DataService:
         if offset:
             statement = statement.offset(offset)
         return list(self.session.exec(statement))
+
+    def count_command_requests(
+        self,
+        *,
+        status: Optional[CommandStatus] = None,
+        device_id: Optional[str] = None,
+    ) -> int:
+        statement = select(func.count()).select_from(CommandRequestState)
+        if status:
+            statement = statement.where(CommandRequestState.status == status)
+        if device_id:
+            statement = statement.where(CommandRequestState.device_id == device_id)
+        return int(self.session.exec(statement).one() or 0)
 
     def mark_command_timeouts(self, *, timeout_seconds: int) -> int:
         if timeout_seconds <= 0:

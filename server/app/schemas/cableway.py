@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 from sqlmodel import SQLModel
 
@@ -17,6 +17,13 @@ class CablewayStatusRead(SQLModel):
     location: str
     plc_host: Optional[str] = None
     status: Optional[dict] = None
+
+
+class CablewayStatusPage(SQLModel):
+    """带总条数的索道状态分页响应。"""
+
+    total: int
+    items: List[CablewayStatusRead]
 
 
 class CablewayCommandRequest(SQLModel):

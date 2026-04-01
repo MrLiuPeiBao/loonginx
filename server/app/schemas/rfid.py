@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Optional
+from typing import List, Optional
 
 from sqlmodel import SQLModel
 
@@ -29,3 +29,10 @@ class RFIDDataRead(RFIDDataBase):
     """读取 RFID 数据。"""
 
     id: int
+
+
+class RFIDDataPage(SQLModel):
+    """带总条数的 RFID 分页响应。"""
+
+    total: int
+    items: List[RFIDDataRead]

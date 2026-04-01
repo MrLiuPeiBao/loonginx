@@ -35,7 +35,7 @@ conda run -n sensor_server python -m uvicorn main:app --reload --host 0.0.0.0 --
 4) 命令下发：API → MQTT → 下位机执行 → 回执 → 上位机记录状态。
 
 历史分页接口补充：
-- `/api/sensors`、`/api/alarms`、`/api/images`、`/api/audio`、`/api/metal-anomaly` 返回 `{ "total": 总条数, "items": 当前页数据 }`，便于前端显示分页总数。
+- `/api/sensors`、`/api/bms`、`/api/rfid`、`/api/commands`、`/api/cableway/status`、`/api/command-requests`、`/api/alarms`、`/api/images`、`/api/audio`、`/api/metal-anomaly` 返回 `{ "total": 总条数, "items": 当前页数据 }`，便于前端显示分页总数。
 
 ## 4. 配置说明（`.env`）
 - `MQTT_*`：MQTT 连接信息

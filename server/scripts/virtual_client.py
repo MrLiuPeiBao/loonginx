@@ -580,6 +580,8 @@ class VirtualClientSimulator:
             rows = response.json()
         except Exception:
             return None
+        if isinstance(rows, dict):
+            rows = rows.get("items")
         if not isinstance(rows, list):
             return None
 
