@@ -9,14 +9,16 @@ import serial
 class RFIDReader:
     """Background thread that streams RFID serial data via callback."""
 
-    def __init__(self, port: str, baudrate: int = 9600):
+    def __init__(self, port: str, baudrate: int = 9600, duplicate_suppress_seconds: float = 1.0):
         self.port = port
         self.baudrate = baudrate
+        self.duplicate_suppress_seconds = max(0.0, float(duplicate_suppress_seconds or 0.0))
         self.serial: Optional[serial.Serial] = None
         self.reading = False
         self.thread: Optional[threading.Thread] = None
         self.callback: Optional[Callable] = None
         self.last_card_id: Optional[str] = None
+        self.last_card_seen_ts: float = 0.0
 
     def start_reading(self, callback: Callable) -> bool:
         """Start the reader thread."""
@@ -51,16 +53,22 @@ class RFIDReader:
                     continue
 
                 card_id = data.hex(' ')
-                if card_id == self.last_card_id:
+                now_ts = self._get_ts()
+                if (
+                    card_id == self.last_card_id
+                    and self.duplicate_suppress_seconds > 0
+                    and (now_ts - self.last_card_seen_ts) < self.duplicate_suppress_seconds
+                ):
                     continue
 
                 self.last_card_id = card_id
+                self.last_card_seen_ts = now_ts
                 payload = {
                     'card_id': card_id,
                     'raw_data': data.hex(),
                     'length': len(data),
                     'timestamp': self._get_timestamp(),
-                    'ts': self._get_ts(),
+                    'ts': now_ts,
                 }
                 if self.callback:
                     self.callback(payload)

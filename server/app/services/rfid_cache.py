@@ -8,7 +8,7 @@ from app.db.models import RFIDData
 from app.services.latest_cache import LatestCache
 
 
-@dataclass(frozen=True)
+@dataclass
 class RFIDSnapshot:
     id: int
     timestamp: datetime
@@ -25,17 +25,19 @@ _cache = LatestCache[RFIDSnapshot]()
 def set_latest_rfid(entity: RFIDData) -> None:
     if getattr(entity, 'id', None) is None:
         return
-    snapshot = RFIDSnapshot(
-        id=int(entity.id),
-        timestamp=entity.timestamp,
-        device_id=entity.device_id,
-        card_id=entity.card_id,
-        raw_data=entity.raw_data,
-        length=entity.length,
-        location=entity.location,
+    _cache.set(
+        RFIDSnapshot(
+            id=int(entity.id),
+            timestamp=entity.timestamp,
+            device_id=entity.device_id,
+            card_id=entity.card_id,
+            raw_data=entity.raw_data,
+            length=entity.length,
+            location=entity.location,
+        )
     )
-    _cache.set(snapshot)
 
 
 def get_latest_rfid() -> Optional[RFIDSnapshot]:
     return _cache.get()
+

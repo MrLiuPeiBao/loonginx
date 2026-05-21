@@ -1,4 +1,4 @@
-"""SQLModel ORM 定义。"""
+"""SQLModel ORM definitions."""
 
 from __future__ import annotations
 
@@ -6,17 +6,18 @@ from datetime import datetime
 from enum import Enum
 from typing import List, Optional
 
-from sqlmodel import Field, SQLModel
-from sqlalchemy import Column, Index, LargeBinary, UniqueConstraint, JSON, Text
+from sqlalchemy import JSON, Column, Index, LargeBinary, Text, UniqueConstraint
 from sqlalchemy.dialects.mysql import LONGBLOB, LONGTEXT
+from sqlmodel import Field, SQLModel
 
 AUDIO_DATA_STORAGE_TYPE = LargeBinary().with_variant(LONGBLOB(), 'mysql')
 CONFIG_JSON_STORAGE_TYPE = Text().with_variant(LONGTEXT(), 'mysql')
 COMMAND_TEXT_STORAGE_TYPE = Text().with_variant(LONGTEXT(), 'mysql')
+IMAGE_DATA_STORAGE_TYPE = Text().with_variant(LONGTEXT(), 'mysql')
 
 
 class SensorTypeEnum(str, Enum):
-    """传感器类型枚举。"""
+    """Supported sensor types."""
 
     TEMPERATURE = 'temperature'
     HUMIDITY = 'humidity'
@@ -30,7 +31,7 @@ class SensorTypeEnum(str, Enum):
 
 
 class SensorConfig(SQLModel, table=True):
-    """传感器阈值配置。"""
+    """Sensor threshold configuration."""
 
     __tablename__ = 'sensor_config'
 
@@ -44,7 +45,7 @@ class SensorConfig(SQLModel, table=True):
 
 
 class RuntimeConfig(SQLModel, table=True):
-    """运行期配置覆盖。"""
+    """Runtime override storage."""
 
     __tablename__ = 'runtime_config'
 
@@ -54,7 +55,7 @@ class RuntimeConfig(SQLModel, table=True):
 
 
 class SensorData(SQLModel, table=True):
-    """环境传感器数据。"""
+    """Environmental sensor readings."""
 
     __tablename__ = 'sensor_data'
     __table_args__ = (
@@ -77,14 +78,14 @@ class SensorData(SQLModel, table=True):
 
 
 class AlarmType(str, Enum):
-    """报警类型。"""
+    """Alarm type."""
 
     LOW = 'low'
     HIGH = 'high'
 
 
 class AlarmRecord(SQLModel, table=True):
-    """报警记录。"""
+    """Alarm record."""
 
     __tablename__ = 'alarm_records'
 
@@ -102,7 +103,7 @@ class AlarmRecord(SQLModel, table=True):
 
 
 class ImageData(SQLModel, table=True):
-    """行人截图数据。"""
+    """Captured image data."""
 
     __tablename__ = 'image_data'
     __table_args__ = (Index('idx_image_timestamp', 'timestamp'),)
@@ -111,13 +112,13 @@ class ImageData(SQLModel, table=True):
     timestamp: datetime = Field(default_factory=datetime.now, nullable=False)
     device_id: str = Field(max_length=50, nullable=False)
     image_name: str = Field(max_length=100, nullable=False)
-    image_data: str = Field(nullable=False)
+    image_data: str = Field(sa_column=Column(IMAGE_DATA_STORAGE_TYPE, nullable=False))
     location: str = Field(max_length=255, nullable=False)
     image_path: Optional[str] = Field(default=None, max_length=512)
 
 
 class AudioData(SQLModel, table=True):
-    """音频数据。"""
+    """Captured audio data."""
 
     __tablename__ = 'audio_data'
     __table_args__ = (Index('idx_audio_timestamp', 'timestamp'),)
@@ -132,7 +133,7 @@ class AudioData(SQLModel, table=True):
 
 
 class MetalAnomaly(SQLModel, table=True):
-    """金属异常信息。"""
+    """Metal anomaly event."""
 
     __tablename__ = 'metal_anomaly'
 
@@ -143,7 +144,7 @@ class MetalAnomaly(SQLModel, table=True):
 
 
 class BMSData(SQLModel, table=True):
-    """BMS 数据。"""
+    """BMS data."""
 
     __tablename__ = 'bms_data'
     __table_args__ = (Index('idx_bms_device', 'device_id', 'timestamp'),)
@@ -165,7 +166,7 @@ class BMSData(SQLModel, table=True):
 
 
 class RFIDData(SQLModel, table=True):
-    """RFID 读卡数据。"""
+    """RFID readings."""
 
     __tablename__ = 'rfid_data'
     __table_args__ = (Index('idx_rfid_timestamp', 'timestamp'),)
@@ -180,7 +181,7 @@ class RFIDData(SQLModel, table=True):
 
 
 class CablewayStatus(SQLModel, table=True):
-    """索道 PLC 状态快照（通过 MQTT 上报）。"""
+    """Cableway PLC status snapshots."""
 
     __tablename__ = 'cableway_status'
     __table_args__ = (
@@ -197,14 +198,14 @@ class CablewayStatus(SQLModel, table=True):
 
 
 class CommandDirection(str, Enum):
-    """命令方向。"""
+    """Command direction."""
 
     REQUEST = 'request'
     RESPONSE = 'response'
 
 
 class CommandLog(SQLModel, table=True):
-    """命令历史。"""
+    """Command history."""
 
     __tablename__ = 'command_logs'
     __table_args__ = (
@@ -247,3 +248,26 @@ class CommandRequestState(SQLModel, table=True):
     request_payload: Optional[str] = Field(default=None, sa_column=Column(COMMAND_TEXT_STORAGE_TYPE))
     response_payload: Optional[str] = Field(default=None, sa_column=Column(COMMAND_TEXT_STORAGE_TYPE))
     error: Optional[str] = Field(default=None, max_length=255)
+
+
+class DeviceHelloState(SQLModel, table=True):
+    """Latest device hello handshake state."""
+
+    __tablename__ = 'device_hello_state'
+
+    device_id: str = Field(primary_key=True, max_length=64)
+    config_version: Optional[int] = Field(default=None)
+    payload_json: str = Field(default='{}', sa_column=Column(CONFIG_JSON_STORAGE_TYPE))
+    seen_at: datetime = Field(default_factory=datetime.now, nullable=False)
+
+
+class ConfigAckState(SQLModel, table=True):
+    """Latest config ack state."""
+
+    __tablename__ = 'config_ack_state'
+
+    device_id: str = Field(primary_key=True, max_length=64)
+    config_version: Optional[int] = Field(default=None)
+    pending_restart_keys: Optional[str] = Field(default=None, sa_column=Column(COMMAND_TEXT_STORAGE_TYPE))
+    payload_json: str = Field(default='{}', sa_column=Column(CONFIG_JSON_STORAGE_TYPE))
+    seen_at: datetime = Field(default_factory=datetime.now, nullable=False)

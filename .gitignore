@@ -43,3 +43,14 @@ client/.env
 server/scripts/__pycache__/
 server/tests/__pycache__/
 client/tests/__pycache__/
+
+# MCP and IDE config
+.serial_mcp/
+
+# Backups and archives
+board_backup/
+*.bak
+*.tar.gz
+
+# Generated media files
+server/media/

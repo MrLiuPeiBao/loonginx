@@ -15,13 +15,20 @@ class GasSensor(BaseSensor):
         self.register_addr = config.get('register_addr', 0)
         self.register_count = config.get('registers', 1)
         self.function_code = config.get('function_code', 3)
+        self.direct_retries = config.get('direct_retries')
+        self.direct_response_delay = config.get('direct_response_delay')
+        self.direct_timeout = config.get('direct_timeout')
+        self.max_attempts = config.get('max_attempts')
 
     def read_data(self):
-        return self.serial_manager.read_registers(
+        return self.serial_manager.read_registers_direct(
             self.address,
             self.register_addr,
             self.register_count,
             function_code=self.function_code,
+            retries=self.direct_retries,
+            response_delay=self.direct_response_delay,
+            timeout=self.direct_timeout,
         )
 
     def parse_data(self, raw_data):

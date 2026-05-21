@@ -6,7 +6,6 @@ sequenceDiagram
   participant D as MySQL
   participant U as API/GUI
 
-  C->>B: 发布 sensors/data 或 cableway/status
   B->>S: 投递消息
   S->>S: 解析/阈值判断/告警生成
   S->>D: 入库
@@ -15,7 +14,6 @@ sequenceDiagram
   S->>D: 读取数据
   S-->>U: 返回结果
 
-  U->>S: 下发命令（/api/commands 或 /api/cableway/command）
   S-->>B: MQTT 下发命令
   B-->>C: 下位机收到并执行
   C-->>B: MQTT 回执

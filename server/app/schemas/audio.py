@@ -33,5 +33,6 @@ class AudioDataRead(AudioDataBase):
 class AudioDataPage(SQLModel):
     """带总条数的音频分页响应。"""
 
+    status: str = 'ok'
     total: int
     items: List[AudioDataRead]

@@ -1,41 +1,26 @@
-"""运行期配置覆盖服务。"""
-
 from __future__ import annotations
 
 import json
-from datetime import datetime
-
-from sqlmodel import Session, select
+from typing import Dict
 
 from app.db.models import RuntimeConfig
 
 
-def get_runtime_config_row(session: Session) -> RuntimeConfig | None:
-    return session.exec(select(RuntimeConfig).order_by(RuntimeConfig.id.desc())).first()
-
-
-def load_runtime_overrides(session: Session) -> dict:
-    row = get_runtime_config_row(session)
-    if not row or not row.config_json:
+def load_runtime_overrides(session) -> Dict[str, object]:
+    row = session.query(RuntimeConfig).order_by(RuntimeConfig.updated_at.desc()).first()
+    if row is None:
         return {}
     try:
-        data = json.loads(row.config_json)
-    except json.JSONDecodeError:
+        data = json.loads(row.config_json or '{}')
+    except Exception:
         return {}
-    if not isinstance(data, dict):
-        return {}
-    return data
+    return data if isinstance(data, dict) else {}
 
 
-def save_runtime_overrides(session: Session, overrides: dict) -> RuntimeConfig:
-    payload = json.dumps(overrides or {}, ensure_ascii=False)
-    row = get_runtime_config_row(session)
-    if row is None:
-        row = RuntimeConfig(config_json=payload)
-        session.add(row)
-    else:
-        row.config_json = payload
-        row.updated_at = datetime.now()
+def save_runtime_overrides(session, overrides: Dict[str, object]) -> RuntimeConfig:
+    row = RuntimeConfig(config_json=json.dumps(dict(overrides or {}), ensure_ascii=False))
+    session.add(row)
     session.commit()
     session.refresh(row)
     return row
+

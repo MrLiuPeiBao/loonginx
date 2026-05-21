@@ -1,9 +1,22 @@
 import logging
 from typing import Optional
 
-from .bms_sensors import BMSSensor
-from .gas_sensors import CH4Sensor, COSensor, H2SSensor, O2Sensor, SmokeSensor
-from .temperature_sensor import HumiditySensor, PressureSensor, TemperatureSensor
+try:
+    from .bms_sensors import BMSSensor
+except Exception:  # pragma: no cover - optional in trimmed local workspace
+    BMSSensor = None
+
+try:
+    from .gas_sensors import CH4Sensor, COSensor, H2SSensor, O2Sensor, SmokeSensor
+except Exception:  # pragma: no cover - optional in trimmed local workspace
+    CH4Sensor = COSensor = H2SSensor = O2Sensor = SmokeSensor = None
+
+from .photoelectric_sensor import PhotoelectricSensor
+
+try:
+    from .temperature_sensor import HumiditySensor, PressureSensor, SharedSmokeSensor, TemperatureSensor
+except Exception:  # pragma: no cover - optional in trimmed local workspace
+    HumiditySensor = PressureSensor = SharedSmokeSensor = TemperatureSensor = None
 
 
 class SensorFactory:
@@ -17,7 +30,8 @@ class SensorFactory:
         'h2s': H2SSensor,
         'o2': O2Sensor,
         'ch4': CH4Sensor,
-        'smoke': SmokeSensor,
+        'smoke': SharedSmokeSensor or SmokeSensor,
+        'photoelectric': PhotoelectricSensor,
         'bms': BMSSensor,
     }
 

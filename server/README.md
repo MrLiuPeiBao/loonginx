@@ -35,7 +35,6 @@ conda run -n sensor_server python -m uvicorn main:app --reload --host 0.0.0.0 --
 4) 命令下发：API → MQTT → 下位机执行 → 回执 → 上位机记录状态。
 
 历史分页接口补充：
-- `/api/sensors`、`/api/bms`、`/api/rfid`、`/api/commands`、`/api/cableway/status`、`/api/command-requests`、`/api/alarms`、`/api/images`、`/api/audio`、`/api/metal-anomaly` 返回 `{ "total": 总条数, "items": 当前页数据 }`，便于前端显示分页总数。
 
 ## 4. 配置说明（`.env`）
 - `MQTT_*`：MQTT 连接信息
@@ -43,6 +42,7 @@ conda run -n sensor_server python -m uvicorn main:app --reload --host 0.0.0.0 --
 - `COMMAND_TIMEOUT_SECONDS`：命令超时判定
 - `DATA_RETENTION_*`：数据保留策略（按天数/容量自动清理）
 - `MEDIA_STORAGE_MODE`：媒体存库或落盘
+- `MEDIA_GATEWAY_*`：媒体接入层（MediaMTX/go2rtc/custom）统一拉流入口
 - `YOLO_*` / `AUDIO_*`：媒体服务配置
 - `runtime_config`：运行期配置覆盖（通过 `/api/runtime-config` 更新）
 > 建议 `API_HOST=0.0.0.0` 以便本机与局域网访问。
@@ -78,7 +78,6 @@ conda run -n sensor_server python -m uvicorn main:app --reload --host 0.0.0.0 --
 - `server/app/mqtt/`：`MQTTManager` 负责连接、订阅、发布、断线恢复。
 - `server/app/services/`：
   - `data_service.py`：统一入库、阈值告警、命令闭环、数据保留清理。
-  - `ingestion.py` / `cableway_ingestion.py`：MQTT 消息解析与入库入口。
   - `alarm_publisher.py` / `alarm_cache.py`：告警生成与缓存。
   - `bms_alerts.py`：单体低压告警。
   - `media_storage.py`：媒体落盘与读取（可选）。
@@ -94,19 +93,49 @@ conda run -n sensor_server python -m uvicorn main:app --reload --host 0.0.0.0 --
 - **DB 不可用怎么办？** 上位机会发布降级告警，不阻塞 MQTT 消费。
 - **媒体存库还是落盘？** 现场资源紧张建议 `filesystem`。
 
-## 9. 虚拟 Client 联调脚本
-- 适用场景：没有下位机硬件时，在开发机上持续模拟 MQTT 上报、命令回执、配置回执，以及图片/音频/金属异常等数据。
-- 脚本位置：`server/scripts/virtual_client.py`
-- 推荐启动方式（使用 Conda 环境）：
+## 媒体与控制面隔离更新（2026-05）
+- 新增 `media-write-worker`（异步后台 worker），`TelemetryBridgeServer` 收到 `telemetry.yolo.snapshot` / `telemetry.audio.clip` 后只做入队并快速 ACK。
+- 新增独立 `media_db_worker`，媒体写入不再和普通 API 查询共用同一个 DB 队列。
+- API `/api/images` 与 `/api/audio` 写入路径改为走 `media_db_worker`，降低媒体大对象写入对控制面查询接口的影响。
+- 新增媒体网关接入（`MEDIA_GATEWAY_*`）：
+  - `RuntimeSupervisor` 可守护外部媒体网关进程（`MEDIA_GATEWAY_EXEC` + `MEDIA_GATEWAY_ARGS`）。
+  - `YOLO` / `Audio` 默认可自动改用 `MEDIA_GATEWAY_RELAY_RTSP` 作为单入口拉流。
+  - `/api/health/workers` 提供 `media_gateway` 状态、直连输入与生效输入对照、`control-panel` 建议拉流地址。
+
+## PLC Control Update
+
+- Cableway PLC control is now server-only. `/api/cableway/command` no longer falls back to MQTT forwarding.
+- The server reads these status registers directly over Modbus TCP: `VD2244`, `VD2248`, `VD2252`, `VW2432`, `V2889.7`, `V2909.0`, `V2909.1`.
+- Detailed fault registers are queried only after `GZ total fault (V2889.7)` is active.
+- Control commands (`control` / `estop`) are executed through a higher-priority worker queue than background polling.
+
+## PLC Timing Trace
+
+- Enable end-to-end PLC timing trace in `.env`:
+  - `PLC_TIMING_TRACE_ENABLED=true`
+  - `PLC_TIMING_TRACE_LOG=logs/plc_timing.log`
+  - `PLC_TIMING_TRACE_INCLUDE_POLL=true`
+  - `PLC_TIMING_TRACE_INCLUDE_HEADERS=true`
+- The trace records the actual control path:
+  - `gui.click`
+  - `api.route_enter`
+  - `svc.enqueue`
+  - `svc.dequeue`
+  - `plc.control_start`
+  - `modbus.tx_send`
+- To analyze the latest command:
 ```powershell
-conda run -n sensor_server python "server/scripts/virtual_client.py"
+$env:PYTHONPATH='C:\Users\lpb\Desktop\loonginx\server'
+python C:\Users\lpb\Desktop\loonginx\server\scripts\analyze_plc_timing.py --last 1
 ```
-- 常用参数：
-  - `--mqtt-broker localhost --mqtt-port 1883`：指定 Broker
-  - `--api-base-url http://127.0.0.1:8000/api`：指定上位机 API
-  - `--duration-seconds 60`：只运行一段时间后自动退出，便于自测
-  - `--no-http-seed`：只模拟 MQTT，不通过 HTTP 补充图片/音频/金属异常
-- 脚本默认会：
-  - 周期发布 `sensors/data`、`sensors/bms`、`sensors/rfid`、`cableway/status`、`device/hello`
-  - 订阅并响应 `sensors/command/request`、`cableway/command/request`、`config/update`
-  - 通过 API 初始化传感器阈值，并写入示例图片、音频、金属异常数据
+- To analyze a specific request:
+```powershell
+$env:PYTHONPATH='C:\Users\lpb\Desktop\loonginx\server'
+python C:\Users\lpb\Desktop\loonginx\server\scripts\analyze_plc_timing.py --request-id <request_id>
+```
+- The primary diagnosis metrics are:
+  - `click_to_tx_send_ms`: operator click to actual Modbus TX send
+  - `db_prelog_ms`: API pre-log database latency
+  - `queue_wait_ms`: time waiting inside `plc_rt` before the command is dequeued
+  - `connect_ms`: Modbus reconnect/build-connection latency
+  - `plc_response_ms`: Modbus TX to RX latency

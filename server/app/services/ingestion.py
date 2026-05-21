@@ -5,11 +5,10 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 from app.db.models import BMSData, RFIDData, SensorData
 from app.core.config import get_settings
-from app.db.session import session_scope
 from app.mqtt import MQTTManager, MQTTMessageContext
 from app.services.alarm_publisher import build_alarm_event, publish_alarm_event
 from app.services.bms_cache import set_latest_bms
@@ -24,6 +23,9 @@ BMS_FIELDS: Tuple[str, ...] = ('voltage', 'soc', 'status', 'capacity', 'power', 
 DEFAULT_DEVICE_ID = 'gateway'
 DEFAULT_LOCATION = 'unknown'
 SENSOR_GROUP_WINDOW_SECONDS = 2.0
+
+if TYPE_CHECKING:
+    from app.runtime.db_worker import DBWorker
 
 
 def _publish_ingestion_failure(
@@ -129,9 +131,9 @@ def _build_sensor_record(
         for field in SENSOR_VALUE_FIELDS
     }
 
-    if any(values[field] is None for field in SENSOR_VALUE_FIELDS):
+    if not any(values[field] is not None for field in SENSOR_VALUE_FIELDS):
         logger.debug(
-            'Sensor dataset discarded (missing fields) for device=%s timestamp=%s',
+            'Sensor dataset discarded (no valid fields) for device=%s timestamp=%s',
             device_id,
             timestamp.isoformat(),
         )
@@ -143,6 +145,25 @@ def _build_sensor_record(
         location=location,
         **values,
     )
+
+
+def _backfill_sensor_record(
+    record: SensorData,
+    previous: Optional[SensorData],
+    *,
+    max_age_seconds: float,
+) -> SensorData:
+    if previous is None:
+        return record
+    age_seconds = (record.timestamp - previous.timestamp).total_seconds()
+    if age_seconds < 0:
+        return record
+    if age_seconds > float(max_age_seconds):
+        return record
+    for field in SENSOR_VALUE_FIELDS:
+        if getattr(record, field, None) is None:
+            setattr(record, field, getattr(previous, field, None))
+    return record
 
 
 def _extract_sensor_map(message: Dict[str, Any]) -> Dict[str, Any]:
@@ -299,6 +320,7 @@ def _parse_rfid_message(message: Any) -> Optional[RFIDData]:
 def handle_sensor_payload(
     context: MQTTMessageContext,
     mqtt_manager: Optional[MQTTManager] = None,
+    db_worker: Optional["DBWorker"] = None,
 ) -> None:
     """Process sensor MQTT payloads."""
     message = _decode_payload(context)
@@ -321,8 +343,9 @@ def handle_sensor_payload(
 
     events: List[Dict[str, Any]] = []
     try:
-        with session_scope() as session:
+        def _persist(session):
             service = DataService(session)
+            max_backfill_age_seconds = float(settings.sensor_backfill_max_age_seconds)
             latest_rfid = service.get_latest_rfid_card()
             location_override = latest_rfid or default_location
             records = _parse_sensor_message(
@@ -331,17 +354,32 @@ def handle_sensor_payload(
                 default_location=location_override,
             )
             if not records:
-                logger.debug('No sensor records parsed from payload on %s', context.topic)
-                return
+                return None, []
             for record in records:
                 record.device_id = default_device
                 if latest_rfid:
                     record.location = latest_rfid
+                previous = service.get_latest_sensor_data(
+                    device_id=record.device_id,
+                    location=record.location,
+                )
+                _backfill_sensor_record(
+                    record,
+                    previous,
+                    max_age_seconds=max_backfill_age_seconds,
+                )
             stored = service.create_sensor_data(records)
-            if stored:
-                latest = max(stored, key=lambda item: item.timestamp)
-                set_latest_sensor(latest)
-            events = service.consume_alarm_events()
+            latest = max(stored, key=lambda item: item.timestamp) if stored else None
+            return latest, service.consume_alarm_events()
+
+        if db_worker is None:
+            raise RuntimeError("db_worker is required for sensor data ingestion")
+        latest, events = db_worker.call(_persist)
+        if latest:
+            set_latest_sensor(latest)
+        if latest is None and not events:
+            logger.debug('No sensor records parsed from payload on %s', context.topic)
+            return
     except Exception as exc:  # pragma: no cover - database/network
         logger.exception('Failed to persist sensor data from MQTT')
         _publish_ingestion_failure(
@@ -361,6 +399,7 @@ def handle_sensor_payload(
 def handle_bms_payload(
     context: MQTTMessageContext,
     mqtt_manager: Optional[MQTTManager] = None,
+    db_worker: Optional["DBWorker"] = None,
 ) -> None:
     """处理 BMS 数据主题。"""
     message = _decode_payload(context)
@@ -372,20 +411,27 @@ def handle_bms_payload(
     fallback_device = payload_device if settings.prefer_payload_device_id else _to_str(context.topic)
     fallback_location = _resolve_location(message, DEFAULT_LOCATION)
     try:
-        with session_scope() as session:
+        def _persist(session):
             service = DataService(session)
             latest_rfid = service.get_latest_rfid_card()
             entity = _parse_bms_message(message)
             if entity is None:
-                logger.debug('No BMS record parsed from payload on %s', context.topic)
-                return
+                return None, None
             entity.device_id = payload_device if settings.prefer_payload_device_id else _to_str(context.topic)
             if latest_rfid:
                 entity.location = latest_rfid
             stored = service.create_bms_data([entity])
-            if stored:
-                set_latest_bms(stored[-1])
-            alarm_event = maybe_create_bms_low_voltage_alarm(service, entity)
+            latest = stored[-1] if stored else None
+            return latest, maybe_create_bms_low_voltage_alarm(service, entity)
+
+        if db_worker is None:
+            raise RuntimeError("db_worker is required for BMS data ingestion")
+        latest, alarm_event = db_worker.call(_persist)
+        if latest:
+            set_latest_bms(latest)
+        if latest is None and alarm_event is None:
+            logger.debug('No BMS record parsed from payload on %s', context.topic)
+            return
     except Exception as exc:  # pragma: no cover
         logger.exception('Failed to persist BMS data from MQTT')
         _publish_ingestion_failure(
@@ -402,27 +448,46 @@ def handle_bms_payload(
         publish_alarm_event(mqtt_manager, alarm_event)
 
 
-def handle_rfid_payload(context: MQTTMessageContext) -> None:
+def handle_rfid_payload(context: MQTTMessageContext, db_worker: Optional["DBWorker"] = None) -> None:
     """处理 RFID 数据主题。"""
     message = _decode_payload(context)
     if message is None:
         return
     settings = get_settings()
-    payload_device = _resolve_device_id(message, _to_str(context.topic))
+    base_obj = message[0] if isinstance(message, list) and message and isinstance(message[0], dict) else message
+    payload_device = _resolve_device_id(base_obj or {}, _to_str(context.topic))
     fallback_device = payload_device if settings.prefer_payload_device_id else _to_str(context.topic)
-    fallback_location = _resolve_location(message, DEFAULT_LOCATION)
+    fallback_location = _resolve_location(base_obj or {}, DEFAULT_LOCATION)
     try:
-        with session_scope() as session:
+        def _persist(session):
             service = DataService(session)
-            entity = _parse_rfid_message(message)
-            if entity is None:
-                logger.debug('No RFID record parsed from payload on %s', context.topic)
-                return
-            entity.device_id = payload_device if settings.prefer_payload_device_id else _to_str(context.topic)
-            stored = service.create_rfid_data([entity])
-            if stored:
-                latest = max(stored, key=lambda item: item.timestamp)
-                set_latest_rfid(latest)
+            parsed_messages = message if isinstance(message, list) else [message]
+            entities = []
+            for item in parsed_messages:
+                entity = _parse_rfid_message(item)
+                if entity is None:
+                    continue
+                entity.device_id = payload_device if settings.prefer_payload_device_id else _to_str(context.topic)
+                entities.append(entity)
+            if not entities:
+                return None
+            stored = service.create_rfid_data(entities)
+            return max(stored, key=lambda item: item.timestamp) if stored else None
+
+        if db_worker is None:
+            raise RuntimeError("db_worker is required for RFID data ingestion")
+        latest = db_worker.call(_persist)
+        if latest:
+            set_latest_rfid(latest)
+            logger.info(
+                'RFID persisted card_id=%s device_id=%s topic=%s',
+                latest.card_id,
+                latest.device_id,
+                context.topic,
+            )
+        else:
+            logger.debug('No RFID record parsed from payload on %s', context.topic)
+            return
     except Exception as exc:  # pragma: no cover
         logger.exception('Failed to persist RFID data from MQTT')
         _publish_ingestion_failure(

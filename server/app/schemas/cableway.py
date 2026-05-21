@@ -1,4 +1,4 @@
-"""索道 PLC（Modbus TCP）相关 API 模型。"""
+"""Cableway PLC API schemas."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from sqlmodel import SQLModel
 
 
 class CablewayStatusRead(SQLModel):
-    """索道 PLC 状态读取模型。"""
+    """Cableway PLC status snapshot."""
 
     id: int
     timestamp: datetime
@@ -20,19 +20,19 @@ class CablewayStatusRead(SQLModel):
 
 
 class CablewayStatusPage(SQLModel):
-    """带总条数的索道状态分页响应。"""
+    """Paginated cableway PLC status response."""
 
     total: int
     items: List[CablewayStatusRead]
 
 
 class CablewayCommandRequest(SQLModel):
-    """向索道 PLC 发送指令/参数（通过 MQTT 转发到网关）。"""
+    """Cableway PLC command request body."""
 
     type: str
     command_code: Optional[int] = None
-    params: Optional[Dict[str, float]] = None
     pulse: Optional[bool] = True
     notes: Optional[str] = None
     device_id: Optional[str] = None
     request_id: Optional[str] = None
+    params: Optional[Dict[str, float]] = None

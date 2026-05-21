@@ -7,16 +7,15 @@ import threading
 import time
 
 from app.core.config import get_settings, load_env
-from app.mqtt import MQTTManager
+from app.runtime import TelemetryBridgeClient
 from app.services.yolo_service import YOLOStreamService
 
 
 def main() -> None:
     load_env()
     settings = get_settings()
-    mqtt_manager = MQTTManager(settings)
-    mqtt_manager.connect()
-    service = YOLOStreamService(settings, mqtt_manager)
+    telemetry_client = TelemetryBridgeClient(settings)
+    service = YOLOStreamService(settings, mqtt_manager=None, telemetry_client=telemetry_client)
     service.start()
 
     stop_event = threading.Event()
@@ -32,7 +31,6 @@ def main() -> None:
             time.sleep(1.0)
     finally:
         service.stop()
-        mqtt_manager.disconnect()
 
 
 if __name__ == '__main__':

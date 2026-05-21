@@ -9,7 +9,7 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional
 import sys
 
 try:  # pragma: no cover - optional heavy dependency
@@ -30,10 +30,9 @@ except ImportError:  # pragma: no cover - optional heavy dependency
 from app.core.config import Settings
 from app.core.constants import MQTT_TOPICS
 from app.db.models import ImageData
-from app.db.session import session_scope
+from app.ipc import IPCUnavailableError
 from app.mqtt import MQTTManager
 from app.services.alarm_publisher import build_alarm_event, publish_alarm_event
-from app.services.data_service import DataService
 from app.services.rtsp_capture import (
     RtspCaptureConfig,
     calc_drop_frames,
@@ -44,6 +43,10 @@ from app.services.rtsp_output import RtspOutput, RtspOutputConfig, create_rtsp_o
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
+
+if TYPE_CHECKING:
+    from app.runtime.db_worker import DBWorker
+    from app.runtime.telemetry_bridge import TelemetryBridgeClient
 
 
 def _ensure_console_logging() -> None:
@@ -62,10 +65,30 @@ def _ensure_console_logging() -> None:
 _ensure_console_logging()
 
 
+def _next_rtsp_failure_backoff(
+    current_seconds: float,
+    *,
+    initial_seconds: float,
+    max_seconds: float,
+) -> float:
+    """Return bounded exponential backoff for offline RTSP sources."""
+    initial = max(1.0, float(initial_seconds or 1.0))
+    maximum = max(initial, float(max_seconds or initial))
+    if current_seconds <= 0:
+        return initial
+    return min(maximum, max(initial, current_seconds * 2.0))
+
+
 class YOLOStreamService:
     """Stream RTSP frames, run YOLO detection, and publish person snapshots."""
 
-    def __init__(self, settings: Settings, mqtt_manager: MQTTManager):
+    def __init__(
+        self,
+        settings: Settings,
+        mqtt_manager: Optional[MQTTManager] = None,
+        telemetry_client: Optional["TelemetryBridgeClient"] = None,
+        db_worker: Optional["DBWorker"] = None,
+    ):
         """Initialize service with runtime dependencies.
 
         Args:
@@ -74,13 +97,28 @@ class YOLOStreamService:
         """
         self._settings = settings
         self._mqtt = mqtt_manager
+        self._telemetry = telemetry_client
+        self._db_worker = db_worker
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
         self._rtsp_output: Optional[RtspOutput] = None
         self._model: Optional[YOLO] = None  # type: ignore[type-arg]
         self._lock = threading.Lock()
-        self._device = 'cuda' if torch is not None and torch.cuda.is_available() else 'cpu'
+        self._device = self._resolve_compute_device()
         self._track_last_capture: Dict[int, float] = {}
+        self._last_telemetry_unavailable_log = 0.0
+        self._telemetry_unavailable_suppressed = 0
+        self._watchdog_lock = threading.Lock()
+        self._watchdog: Dict[str, Any] = {
+            'stream_restart_count': 0,
+            'consecutive_inference_timeouts': 0,
+            'last_inference_started_at': None,
+            'last_inference_finished_at': None,
+            'last_inference_duration_ms': None,
+            'last_watchdog_event': '',
+            'last_watchdog_event_at': None,
+            'last_stream_open_failed_at': None,
+        }
         logger.info('YOLO service initialized on device %s', self._device.upper())
 
     @property
@@ -90,7 +128,7 @@ class YOLOStreamService:
         Returns:
             bool: True if YOLO is enabled and RTSP input is configured.
         """
-        return bool(self._settings.yolo_enabled and self._settings.yolo_rtsp_input)
+        return bool(self._settings.yolo_enabled and self._settings.resolve_yolo_rtsp_input())
 
     def start(self) -> None:
         """Spawn background worker when dependencies and config allow.
@@ -138,9 +176,76 @@ class YOLOStreamService:
         self.stop()
         self.start()
 
+    def get_watchdog_status(self) -> Dict[str, Any]:
+        """Return a thread-safe YOLO watchdog status snapshot."""
+        with self._watchdog_lock:
+            payload = dict(self._watchdog)
+        payload.update(
+            {
+                'enabled': bool(self._settings.yolo_enabled),
+                'run_mode': str(self._settings.yolo_run_mode or 'thread'),
+                'inference_timeout_seconds': float(getattr(self._settings, 'yolo_inference_timeout_seconds', 8.0) or 8.0),
+                'inference_timeout_consecutive_limit': int(
+                    getattr(self._settings, 'yolo_inference_timeout_consecutive_limit', 1) or 1
+                ),
+                'watchdog_max_stream_restarts': int(
+                    getattr(self._settings, 'yolo_watchdog_max_stream_restarts', 3) or 3
+                ),
+            }
+        )
+        return payload
+
+    def _watchdog_update(self, **kwargs: Any) -> None:
+        with self._watchdog_lock:
+            self._watchdog.update(kwargs)
+
+    def _watchdog_mark_event(self, event: str) -> None:
+        now = datetime.now().isoformat(timespec='seconds')
+        self._watchdog_update(last_watchdog_event=str(event), last_watchdog_event_at=now)
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+    def _log_telemetry_unavailable(self, exc: BaseException) -> None:
+        """Log missing telemetry bridge without flooding the inference loop."""
+        now = time.monotonic()
+        if now - self._last_telemetry_unavailable_log < 10.0:
+            self._telemetry_unavailable_suppressed += 1
+            return
+
+        suppressed = self._telemetry_unavailable_suppressed
+        self._telemetry_unavailable_suppressed = 0
+        self._last_telemetry_unavailable_log = now
+        if suppressed:
+            logger.warning(
+                'Telemetry bridge unavailable; skipping YOLO snapshot until API pipe is ready: %s '
+                '(suppressed=%d)',
+                exc,
+                suppressed,
+            )
+        else:
+            logger.warning(
+                'Telemetry bridge unavailable; skipping YOLO snapshot until API pipe is ready: %s',
+                exc,
+            )
+
+    def _resolve_compute_device(self) -> str:
+        requested = str(getattr(self._settings, 'yolo_compute_device', 'auto') or 'auto').strip()
+        normalized = requested.lower()
+        cuda_available = bool(torch is not None and torch.cuda.is_available())
+
+        if normalized in {'', 'auto'}:
+            return 'cuda:0' if cuda_available else 'cpu'
+        if normalized in {'gpu', 'cuda'}:
+            if cuda_available:
+                return 'cuda:0'
+            logger.warning('YOLO_COMPUTE_DEVICE=%s requested but CUDA is unavailable; fallback to CPU', requested)
+            return 'cpu'
+        if normalized.startswith('cuda') and not cuda_available:
+            logger.warning('YOLO_COMPUTE_DEVICE=%s requested but CUDA is unavailable; fallback to CPU', requested)
+            return 'cpu'
+        return requested
+
     def _run_loop(self) -> None:
         """Run RTSP capture loop with automatic reconnects."""
         assert cv2 is not None  # for type-checkers
@@ -153,8 +258,39 @@ class YOLOStreamService:
             logger.exception('Failed to load YOLO model: %s', exc)
             return
 
-        input_url = self._settings.yolo_rtsp_input
-        reconnect_delay = 5.0
+        input_url = self._settings.resolve_yolo_rtsp_input()
+        reconnect_delay = max(
+            1.0,
+            float(
+                getattr(
+                    self._settings,
+                    'yolo_rtsp_failure_backoff_initial_seconds',
+                    10.0,
+                )
+                or 10.0
+            ),
+        )
+        max_reconnect_delay = max(
+            reconnect_delay,
+            float(
+                getattr(
+                    self._settings,
+                    'yolo_rtsp_failure_backoff_max_seconds',
+                    120.0,
+                )
+                or reconnect_delay
+            ),
+        )
+        failed_opens = 0
+        stream_restarts = 0
+        max_stream_restarts = max(
+            0,
+            int(getattr(self._settings, 'yolo_watchdog_max_stream_restarts', 3) or 0),
+        )
+        reconnect_cooldown = max(
+            0.0,
+            float(getattr(self._settings, 'yolo_watchdog_reconnect_cooldown_seconds', 2.0) or 0.0),
+        )
         while not self._stop_event.is_set():
             capture_config = RtspCaptureConfig(
                 input_url=input_url,
@@ -163,30 +299,72 @@ class YOLOStreamService:
             )
             cap = open_capture(capture_config)
             if cap is None or not cap.isOpened():
-                logger.error('Unable to open RTSP stream %s, retry in %.1fs', input_url, reconnect_delay)
+                failed_opens += 1
+                logger.error(
+                    'Unable to open RTSP stream %s, retry in %.1fs (failures=%d)',
+                    input_url,
+                    reconnect_delay,
+                    failed_opens,
+                )
+                self._watchdog_update(last_stream_open_failed_at=datetime.now().isoformat(timespec='seconds'))
+                self._watchdog_mark_event('stream_open_failed')
                 if cap is not None:
                     cap.release()
                 self._wait_with_stop(reconnect_delay)
+                reconnect_delay = _next_rtsp_failure_backoff(
+                    reconnect_delay,
+                    initial_seconds=getattr(
+                        self._settings,
+                        'yolo_rtsp_failure_backoff_initial_seconds',
+                        10.0,
+                    ),
+                    max_seconds=max_reconnect_delay,
+                )
                 continue
 
             logger.info('YOLO stream connected to %s', input_url)
+            self._watchdog_mark_event('stream_connected')
+            reconnect_delay = max(
+                1.0,
+                float(
+                    getattr(
+                        self._settings,
+                        'yolo_rtsp_failure_backoff_initial_seconds',
+                        10.0,
+                    )
+                    or 10.0
+                ),
+            )
+            failed_opens = 0
             try:
                 self._start_rtsp_output()
-                self._process_stream(cap)
+                break_reason = self._process_stream(cap)
+                if break_reason == 'watchdog_timeout':
+                    stream_restarts += 1
+                    self._watchdog_update(stream_restart_count=stream_restarts)
+                    self._watchdog_mark_event('watchdog_timeout_reconnect')
+                    if max_stream_restarts > 0 and stream_restarts > max_stream_restarts:
+                        logger.error(
+                            'YOLO watchdog reached max stream restarts (%d), stopping stream loop',
+                            max_stream_restarts,
+                        )
+                        self._watchdog_mark_event('watchdog_restart_limit_reached')
+                        break
             finally:
                 cap.release()
                 self._stop_rtsp_output()
                 logger.info('YOLO stream disconnected, will retry shortly')
 
-            self._wait_with_stop(2.0)
+            wait_seconds = reconnect_cooldown if reconnect_cooldown > 0 else 2.0
+            self._wait_with_stop(wait_seconds)
 
-    def _process_stream(self, cap: 'cv2.VideoCapture') -> None:
+    def _process_stream(self, cap: 'cv2.VideoCapture') -> str:
         """Track persons, push snapshots, and forward annotated frames."""
         assert cv2 is not None
         if self._model is None:
-            return
+            return 'model_unavailable'
 
-        detection_interval = max(
+        snapshot_interval = max(
             1.0,
             float(
                 self._settings.yolo_detection_interval
@@ -207,38 +385,156 @@ class YOLOStreamService:
         )
         tracker_config = self._settings.yolo_tracker_config or 'bytetrack.yaml'
         target_fps = max(1, int(self._settings.yolo_fps or 25))
+        target_frame_interval = 1.0 / float(target_fps)
         drop_frames = bool(self._settings.yolo_drop_frames)
         max_drop_frames = int(self._settings.yolo_drop_max_frames or target_fps)
         if max_drop_frames < 0:
             max_drop_frames = 0
+        read_failure_reconnect_threshold = max(
+            1,
+            int(getattr(self._settings, 'yolo_read_failure_reconnect_threshold', 5) or 5),
+        )
+        inference_interval = max(
+            0.05,
+            float(getattr(self._settings, 'yolo_inference_interval', 0.2) or 0.2),
+        )
+        inference_size = max(
+            320,
+            int(getattr(self._settings, 'yolo_inference_size', 640) or 640),
+        )
+        last_inference_started = 0.0
+        latest_annotated_frame: Optional[Any] = None
+        inference_lock = threading.Lock()
+        inference_busy = threading.Event()
+        inference_busy_since = {'value': 0.0}
+        forwarded_frames = 0
+        inference_runs = 0
+        consecutive_read_failures = 0
+        consecutive_inference_timeouts = 0
+        inference_timeout_seconds = max(
+            0.5,
+            float(getattr(self._settings, 'yolo_inference_timeout_seconds', 8.0) or 8.0),
+        )
+        inference_timeout_limit = max(
+            1,
+            int(getattr(self._settings, 'yolo_inference_timeout_consecutive_limit', 1) or 1),
+        )
+        last_stream_log = time.time()
 
-        while not self._stop_event.is_set():
-            ok, frame = cap.read()
-            if not ok:
-                logger.warning('Failed to read frame from RTSP, waiting before retry')
-                self._wait_with_stop(1.0)
-                continue
-
-            frame_start = time.time()
+        def run_inference(raw_frame: Any) -> None:
+            nonlocal latest_annotated_frame
+            inference_start = time.time()
+            self._watchdog_update(last_inference_started_at=datetime.now().isoformat(timespec='seconds'))
             try:
                 results_list = self._model.track(
-                    frame,
+                    raw_frame,
                     persist=True,
                     verbose=False,
                     device=self._device,
                     classes=0,
                     conf=conf_threshold,
                     tracker=tracker_config,
+                    imgsz=inference_size,
                 )
                 results = results_list[0]
+                boxes = getattr(results, 'boxes', None)
+                box_count = len(boxes) if boxes is not None else 0
+                logger.info(
+                    'YOLO inference found %d person boxes at confidence %.2f',
+                    box_count,
+                    conf_threshold,
+                )
+                annotated_frame = results.plot()
+                self._handle_tracks(raw_frame, annotated_frame, results, snapshot_interval)
+                with inference_lock:
+                    latest_annotated_frame = annotated_frame
+                elapsed_ms = (time.time() - inference_start) * 1000.0
+                logger.debug('YOLO inference processed in %.2f ms', elapsed_ms)
+                self._watchdog_update(
+                    last_inference_duration_ms=float(elapsed_ms),
+                    last_inference_finished_at=datetime.now().isoformat(timespec='seconds'),
+                )
             except Exception as exc:  # pragma: no cover - GPU specific
                 logger.exception('YOLO tracking failed: %s', exc)
+                self._watchdog_mark_event('inference_error')
+            finally:
+                inference_busy.clear()
+                inference_busy_since['value'] = 0.0
+
+        while not self._stop_event.is_set():
+            ok, frame = cap.read()
+            if not ok:
+                consecutive_read_failures += 1
+                logger.warning(
+                    'Failed to read frame from RTSP (%d/%d), waiting before retry',
+                    consecutive_read_failures,
+                    read_failure_reconnect_threshold,
+                )
+                if consecutive_read_failures >= read_failure_reconnect_threshold:
+                    logger.warning(
+                        'RTSP read failed %d times consecutively; reopening stream',
+                        consecutive_read_failures,
+                    )
+                    self._watchdog_mark_event('rtsp_read_failure_reconnect')
+                    return 'read_failures'
                 self._wait_with_stop(1.0)
                 continue
+            consecutive_read_failures = 0
 
-            annotated_frame = results.plot()
-            self._handle_tracks(frame, annotated_frame, results, detection_interval)
-            self._write_rtsp_frame(annotated_frame)
+            frame_start = time.time()
+            now = time.time()
+            if (
+                not inference_busy.is_set()
+                and now - last_inference_started >= inference_interval
+            ):
+                last_inference_started = now
+                inference_runs += 1
+                inference_busy.set()
+                inference_busy_since['value'] = now
+                infer_frame = frame.copy()
+                threading.Thread(
+                    target=run_inference,
+                    args=(infer_frame,),
+                    name='yolo-inference',
+                    daemon=True,
+                ).start()
+            elif inference_busy.is_set():
+                busy_for = now - float(inference_busy_since['value'] or now)
+                if busy_for >= inference_timeout_seconds:
+                    consecutive_inference_timeouts += 1
+                    self._watchdog_update(
+                        consecutive_inference_timeouts=consecutive_inference_timeouts,
+                    )
+                    logger.error(
+                        'YOLO inference watchdog timeout busy_for=%.2fs threshold=%.2fs consecutive=%d/%d',
+                        busy_for,
+                        inference_timeout_seconds,
+                        consecutive_inference_timeouts,
+                        inference_timeout_limit,
+                    )
+                    self._watchdog_mark_event('inference_timeout')
+                    inference_busy.clear()
+                    inference_busy_since['value'] = 0.0
+                    last_inference_started = now
+                    if consecutive_inference_timeouts >= inference_timeout_limit:
+                        logger.error(
+                            'YOLO watchdog triggered stream reconnect due to consecutive inference timeouts=%d',
+                            consecutive_inference_timeouts,
+                        )
+                        self._watchdog_mark_event('watchdog_timeout_break_stream')
+                        return 'watchdog_timeout'
+
+            with inference_lock:
+                output_frame = latest_annotated_frame
+                latest_annotated_frame = None
+            if output_frame is None:
+                output_frame = frame
+            else:
+                output_frame = output_frame.copy()
+                consecutive_inference_timeouts = 0
+                self._watchdog_update(consecutive_inference_timeouts=0)
+            self._write_rtsp_frame(output_frame)
+            forwarded_frames += 1
 
             elapsed_ms = (time.time() - frame_start) * 1000.0
             if drop_frames:
@@ -247,7 +543,22 @@ class YOLOStreamService:
                     drained = drain_capture(cap, drop_count)
                     if drained:
                         logger.debug('Dropped %d frames to reduce lag', drained)
-            logger.debug('YOLO frame processed in %.2f ms', elapsed_ms)
+            now = time.time()
+            if now - last_stream_log >= 5.0:
+                logger.info(
+                    'YOLO stream forwarded %d frames, scheduled %d inference jobs in %.1fs',
+                    forwarded_frames,
+                    inference_runs,
+                    now - last_stream_log,
+                )
+                forwarded_frames = 0
+                inference_runs = 0
+                last_stream_log = now
+            sleep_seconds = target_frame_interval - (time.time() - frame_start)
+            if sleep_seconds > 0:
+                self._stop_event.wait(sleep_seconds)
+            logger.debug('YOLO stream frame forwarded in %.2f ms', elapsed_ms)
+        return 'stop_event'
 
     def _handle_tracks(
         self,
@@ -258,23 +569,21 @@ class YOLOStreamService:
     ) -> None:
         """Emit snapshots for tracked persons with per-track cooldown."""
         boxes = getattr(results, 'boxes', None)
-        ids = getattr(boxes, 'id', None) if boxes is not None else None
-        if boxes is None or ids is None:
+        if boxes is None:
             return
 
         now = time.time()
-        for box in boxes:
-            track_identifier = getattr(box, 'id', None)
-            if track_identifier is None:
+        for index, box in enumerate(boxes):
+            track_id = self._resolve_track_id(box, index)
+            if track_id is None:
+                logger.debug('Skip YOLO box without usable track id at index=%s', index)
                 continue
             try:
-                track_id = int(
-                    track_identifier.item()
-                    if hasattr(track_identifier, 'item')
-                    else track_identifier
-                )
+                track_id = int(track_id)
             except Exception:
                 continue
+            if track_id < 0:
+                logger.info('Using fallback YOLO track id %s for detection index=%s', track_id, index)
 
             last_capture = self._track_last_capture.get(track_id, 0.0)
             if now - last_capture < detection_interval:
@@ -297,6 +606,30 @@ class YOLOStreamService:
                     logger.debug('Track %s bbox unavailable', track_id)
             self._emit_snapshots(track_id, raw_frame, annotated_frame, timestamp)
 
+    def _resolve_track_id(self, box: Any, index: int) -> Optional[int]:
+        """Return tracker id, or a stable fallback id when the tracker has not assigned one."""
+        track_identifier = getattr(box, 'id', None)
+        if track_identifier is not None:
+            try:
+                return int(track_identifier.item() if hasattr(track_identifier, 'item') else track_identifier)
+            except Exception:
+                logger.debug('Invalid YOLO track id: %s', track_identifier)
+
+        coords = getattr(box, 'xyxy', None)
+        if coords is None:
+            return None
+        try:
+            values = coords.tolist()[0]
+        except Exception:
+            return None
+        if len(values) < 4:
+            return None
+        center_x = int((float(values[0]) + float(values[2])) / 2.0 / 32.0)
+        center_y = int((float(values[1]) + float(values[3])) / 2.0 / 32.0)
+        width = int(abs(float(values[2]) - float(values[0])) / 32.0)
+        height = int(abs(float(values[3]) - float(values[1])) / 32.0)
+        return -abs(hash((center_x, center_y, width, height, index)) % 1_000_000)
+
     def _emit_snapshots(
         self,
         track_id: int,
@@ -311,7 +644,48 @@ class YOLOStreamService:
         unix_time = timestamp.timestamp()
         image_name = f'person_{track_id}_{timestamp.strftime("%Y%m%d_%H%M%S_%f")}.jpg'
 
-        raw_b64 = self._encode_frame(raw_frame, quality=80)
+        snapshot_raw = self._resize_snapshot_frame(raw_frame)
+        snapshot_annotated = self._resize_snapshot_frame(annotated_frame)
+        raw_b64 = self._encode_frame(snapshot_raw, quality=80)
+        annotated_b64 = self._encode_frame(snapshot_annotated, quality=85)
+        if self._telemetry is not None and raw_b64 and annotated_b64:
+            try:
+                response = self._telemetry.emit(
+                    kind='telemetry.yolo.snapshot',
+                    source='yolo',
+                    body={
+                        'track_id': int(track_id),
+                        'timestamp': timestamp.isoformat(),
+                        'ts': unix_time,
+                        'device_id': device_id,
+                        'location': location,
+                        'image_name': image_name,
+                        'raw_b64': raw_b64,
+                        'annotated_b64': annotated_b64,
+                    },
+                )
+            except IPCUnavailableError as exc:
+                self._log_telemetry_unavailable(exc)
+                return
+            except Exception:
+                logger.exception(
+                    'Telemetry yolo snapshot emit failed: track=%s name=%s',
+                    track_id,
+                    image_name,
+                )
+                return
+            response_body = response.get('body') if isinstance(response, dict) else None
+            if not isinstance(response_body, dict) or not response_body.get('ok'):
+                logger.error(
+                    'Telemetry yolo snapshot failed: track=%s name=%s response=%s',
+                    track_id,
+                    image_name,
+                    response,
+                )
+            else:
+                logger.info('Telemetry yolo snapshot accepted: track=%s name=%s', track_id, image_name)
+            return
+
         if raw_b64:
             payload = {
                 'track_id': track_id,
@@ -342,7 +716,6 @@ class YOLOStreamService:
         else:
             logger.error('Failed to encode raw snapshot for track %s', track_id)
 
-        annotated_b64 = self._encode_frame(annotated_frame, quality=85)
         if annotated_b64:
             payload = {
                 'track_id': track_id,
@@ -364,14 +737,15 @@ class YOLOStreamService:
     def _resolve_location(self) -> str:
         """Resolve current location (prefer latest RFID card_id, fallback to config)."""
         fallback = self._settings.yolo_location or 'rtsp'
-        try:
-            with session_scope() as session:
-                service = DataService(session)
-                latest_rfid = service.get_latest_rfid_card()
+        if self._telemetry is not None:
+            return fallback
+        if self._db_worker is not None:
+            try:
+                latest_rfid = self._db_worker.call_data_service('get_latest_rfid_card')
                 if latest_rfid:
                     return latest_rfid
-        except Exception:  # pragma: no cover - best-effort
-            logger.debug('Failed to resolve latest RFID for YOLO snapshot location')
+            except Exception:
+                logger.debug('Failed to resolve latest RFID for YOLO snapshot location', exc_info=True)
         return fallback
 
     def _encode_frame(self, frame: Any, *, quality: int) -> Optional[str]:
@@ -386,8 +760,26 @@ class YOLOStreamService:
             return None
         return base64.b64encode(buffer).decode('ascii')
 
+    def _resize_snapshot_frame(self, frame: Any) -> Any:
+        """Resize snapshots before encoding to keep DB and MQTT payloads bounded."""
+        assert cv2 is not None
+        target_width = int(self._settings.yolo_frame_width or 640)
+        target_height = int(self._settings.yolo_frame_height or 360)
+        if target_width <= 0 or target_height <= 0:
+            return frame
+        try:
+            height, width = frame.shape[:2]
+        except Exception:
+            return frame
+        if width == target_width and height == target_height:
+            return frame
+        return cv2.resize(frame, (target_width, target_height), interpolation=cv2.INTER_AREA)
+
     def _publish_payload(self, topic: str, payload: Dict[str, Any], description: str) -> None:
         """Publish payload to MQTT with logging."""
+        if self._mqtt is None:
+            logger.debug('Skip MQTT publish for %s because mqtt_manager is None', description)
+            return
         try:
             payload_bytes = json.dumps(payload).encode('utf-8')
             logger.debug('Publishing %s (%d bytes) to %s', description, len(payload_bytes), topic)
@@ -407,9 +799,8 @@ class YOLOStreamService:
         image_data: str,
     ) -> None:
         """Persist snapshot metadata into database."""
-        try:
-            with session_scope() as session:
-                service = DataService(session)
+        if self._db_worker is not None:
+            try:
                 entity = ImageData(
                     timestamp=timestamp,
                     device_id=device_id,
@@ -417,15 +808,21 @@ class YOLOStreamService:
                     image_data=image_data,
                     location=location,
                 )
-                service.create_image_data([entity])
-            logger.info(
-                'Snapshot stored in database: name=%s device=%s location=%s',
-                image_name,
-                device_id,
-                location,
-            )
-        except Exception:  # pragma: no cover - database dependency
-            logger.exception('Failed to store snapshot %s', image_name)
+                self._db_worker.call_data_service('create_image_data', [entity])
+                logger.info(
+                    'Snapshot stored in database: name=%s device=%s location=%s',
+                    image_name,
+                    device_id,
+                    location,
+                )
+            except Exception:
+                logger.exception('Failed to store snapshot %s', image_name)
+            return
+        logger.error(
+            'Skipping snapshot persistence because db_worker is not configured name=%s device=%s',
+            image_name,
+            device_id,
+        )
 
     def _write_rtsp_frame(self, annotated_frame: Any) -> None:
         """Forward annotated frames through RTSP output backend."""
@@ -433,7 +830,15 @@ class YOLOStreamService:
             return
         width = int(self._settings.yolo_frame_width or annotated_frame.shape[1])
         height = int(self._settings.yolo_frame_height or annotated_frame.shape[0])
-        resized = cv2.resize(annotated_frame, (width, height))
+        try:
+            frame_height, frame_width = annotated_frame.shape[:2]
+        except Exception:
+            return
+        if frame_width == width and frame_height == height:
+            resized = annotated_frame
+        else:
+            interpolation = cv2.INTER_AREA if width < frame_width or height < frame_height else cv2.INTER_LINEAR
+            resized = cv2.resize(annotated_frame, (width, height), interpolation=interpolation)
         self._rtsp_output.write_frame(resized)
 
     def _start_rtsp_output(self) -> None:

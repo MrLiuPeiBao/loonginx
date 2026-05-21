@@ -1,3 +1,8 @@
-"""MQTT 管理模块。"""
+from app.mqtt.client import MQTTManager, MQTTMessageContext, MQTTMessageHandler
 
-from .client import MQTTManager, MQTTMessageContext, MQTTMessageHandler  # noqa: F401
+__all__ = [
+    'MQTTManager',
+    'MQTTMessageContext',
+    'MQTTMessageHandler',
+]
+

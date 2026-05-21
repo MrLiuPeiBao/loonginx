@@ -46,6 +46,24 @@ class DataParser:
         return round(raw_value / 10.0, 1) if raw_value is not None else None
 
     @staticmethod
+    def parse_shangluo_temperature(data_bytes: bytes) -> Optional[float]:
+        """Shangluo temperature: (register 01 value - 2000) / 100."""
+        raw_value = DataParser.parse_raw(data_bytes)
+        return round((raw_value - 2000) / 100.0, 2) if raw_value is not None else None
+
+    @staticmethod
+    def parse_shangluo_humidity(data_bytes: bytes) -> Optional[float]:
+        """Shangluo humidity: register 02 value / 100."""
+        raw_value = DataParser.parse_raw(data_bytes)
+        return round(raw_value / 100.0, 2) if raw_value is not None else None
+
+    @staticmethod
+    def parse_shangluo_smoke(data_bytes: bytes) -> Optional[float]:
+        """Shangluo smoke: raw register value scaled by 100."""
+        raw_value = DataParser.parse_raw(data_bytes)
+        return round(raw_value / 100.0, 2) if raw_value is not None else None
+
+    @staticmethod
     def parse_bms_data(
         data_bytes: bytes,
         multiplier: float = 1.0,

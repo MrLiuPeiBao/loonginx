@@ -1,58 +1,45 @@
-"""命令日志与请求模型。"""
-
 from __future__ import annotations
 
 from datetime import datetime
-from typing import List, Optional, Union
+from typing import List, Optional
 
 from sqlmodel import SQLModel
 
-from app.db.models import CommandDirection, CommandStatus
-
 
 class CommandLogRead(SQLModel):
-    """命令日志读取模型。"""
-
     id: int
     timestamp: datetime
-    direction: CommandDirection
+    direction: str
     payload: str
     notes: Optional[str] = None
     device_id: Optional[str] = None
 
 
 class CommandLogPage(SQLModel):
-    """带总条数的命令日志分页响应。"""
-
     total: int
     items: List[CommandLogRead]
 
 
 class CommandRequest(SQLModel):
-    """命令发送请求。"""
-
-    payload: Union[str, List[int]]
+    payload: str
     notes: Optional[str] = None
     device_id: Optional[str] = None
     request_id: Optional[str] = None
 
 
 class CommandRequestStatusRead(SQLModel):
-    """命令请求状态读取模型。"""
-
     request_id: str
-    status: CommandStatus
-    command_type: str
-    device_id: Optional[str] = None
     created_at: datetime
     updated_at: datetime
+    command_type: str
+    status: str
+    device_id: Optional[str] = None
     request_payload: Optional[str] = None
     response_payload: Optional[str] = None
     error: Optional[str] = None
 
 
 class CommandRequestStatusPage(SQLModel):
-    """带总条数的命令请求状态分页响应。"""
-
     total: int
     items: List[CommandRequestStatusRead]
+

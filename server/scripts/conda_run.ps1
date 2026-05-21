@@ -5,6 +5,7 @@ param(
     [string]$MySqlServiceName = 'MySQL80',
     [string]$CondaExe = '',
     [switch]$SkipLocalRtspAudio,
+    [switch]$NoPortCleanup,
     [switch]$Help
 )
 
@@ -21,6 +22,7 @@ Parameters:
   -MySqlServiceName   Windows service name for MySQL (default: MySQL80)
   -CondaExe           Optional path to conda.exe/conda.bat
   -SkipLocalRtspAudio Do not auto-start the local RTSP audio simulator
+  -NoPortCleanup      Do not stop existing processes that occupy startup ports
 "@
     return
 }
@@ -200,6 +202,22 @@ function Get-MosquittoPath {
     return ''
 }
 
+function Get-MosquittoConfigPath {
+    param(
+        [string]$Prefix,
+        [string]$ScriptsRoot
+    )
+    $localConf = Join-Path $ScriptsRoot 'mosquitto_lan.conf'
+    if (Test-Path $localConf) {
+        return (Resolve-Path $localConf).Path
+    }
+    $envConf = "$Prefix/Library/etc/mosquitto/mosquitto.conf"
+    if (Test-Path $envConf) {
+        return $envConf
+    }
+    return ''
+}
+
 function Start-MySqlService {
     param([string]$PreferredName)
 
@@ -247,7 +265,7 @@ function Start-ServerWindow {
         $envCmd = "$envCmd `$env:PATH = '$escapedPath;' + `$env:PATH;"
     }
     $fullCmd = "$titleCmd $encodingCmd $cdCmd $envCmd $Command"
-    Start-Process -FilePath "powershell" -WorkingDirectory "$safeDir" -ArgumentList "-NoExit", "-Command", $fullCmd | Out-Null
+    Start-Process -FilePath "powershell" -WorkingDirectory "$safeDir" -ArgumentList "-NoExit", "-ExecutionPolicy", "Bypass", "-Command", $fullCmd | Out-Null
     Write-Step "Started $Title window."
 }
 
@@ -281,7 +299,19 @@ function Test-LoopbackHost {
     return @('127.0.0.1', 'localhost', '::1') -contains $HostName.Trim().ToLowerInvariant()
 }
 
-function Get-LocalRtspEndpoint {
+function Get-ProbeHost {
+    param([string]$HostName)
+    if (-not $HostName) {
+        return '127.0.0.1'
+    }
+    $normalized = $HostName.Trim().ToLowerInvariant()
+    if ($normalized -in @('0.0.0.0', '::', '[::]', '+')) {
+        return '127.0.0.1'
+    }
+    return $HostName
+}
+
+function Get-RtspEndpoint {
     param([string]$Url)
     if (-not $Url) {
         return $null
@@ -294,9 +324,6 @@ function Get-LocalRtspEndpoint {
     if ($uri.Scheme -ne 'rtsp') {
         return $null
     }
-    if (-not (Test-LoopbackHost -HostName $uri.Host)) {
-        return $null
-    }
     $port = if ($uri.IsDefaultPort) { 554 } else { $uri.Port }
     $mount = if ($uri.AbsolutePath) { $uri.AbsolutePath } else { '/' }
     return [pscustomobject]@{
@@ -304,6 +331,18 @@ function Get-LocalRtspEndpoint {
         Port = $port
         Mount = $mount
     }
+}
+
+function Get-LocalRtspEndpoint {
+    param([string]$Url)
+    $endpoint = Get-RtspEndpoint -Url $Url
+    if (-not $endpoint) {
+        return $null
+    }
+    if (-not (Test-LoopbackHost -HostName $endpoint.Host)) {
+        return $null
+    }
+    return $endpoint
 }
 
 function Test-TcpEndpointListening {
@@ -329,6 +368,141 @@ function Test-TcpEndpointListening {
             $async.AsyncWaitHandle.Close()
         }
         $client.Close()
+    }
+}
+
+function Get-PortListenerProcessIds {
+    param([int]$Port)
+    if ($Port -le 0) {
+        return @()
+    }
+    try {
+        return @(
+            Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue |
+                Where-Object { $_.OwningProcess -and $_.OwningProcess -gt 0 } |
+                Select-Object -ExpandProperty OwningProcess -Unique
+        )
+    } catch {
+        return @()
+    }
+}
+
+function Stop-ProcessTree {
+    param(
+        [int]$ProcessId,
+        [hashtable]$Visited = @{}
+    )
+    if ($ProcessId -le 0 -or $Visited.ContainsKey($ProcessId)) {
+        return
+    }
+    $Visited[$ProcessId] = $true
+    if ($ProcessId -eq $PID) {
+        Write-Warning "Skip stopping current startup script process PID=$ProcessId"
+        return
+    }
+
+    $children = @()
+    try {
+        $children = @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$ProcessId" -ErrorAction SilentlyContinue)
+    } catch {
+        $children = @()
+    }
+    foreach ($child in $children) {
+        Stop-ProcessTree -ProcessId ([int]$child.ProcessId) -Visited $Visited
+    }
+
+    try {
+        $proc = Get-Process -Id $ProcessId -ErrorAction Stop
+        Write-Step "Stopping PID $ProcessId ($($proc.ProcessName))"
+        Stop-Process -Id $ProcessId -Force -ErrorAction Stop
+    } catch {
+        Write-Warning "Failed to stop PID ${ProcessId}: $($_.Exception.Message)"
+    }
+}
+
+function Stop-PortListeners {
+    param(
+        [int]$Port,
+        [string]$Label
+    )
+    $ownerIds = @(Get-PortListenerProcessIds -Port $Port)
+    if (-not $ownerIds -or $ownerIds.Count -eq 0) {
+        return
+    }
+    $names = ($ownerIds | ForEach-Object {
+        try {
+            $proc = Get-Process -Id $_ -ErrorAction Stop
+            "$_/$($proc.ProcessName)"
+        } catch {
+            "$_/unknown"
+        }
+    }) -join ', '
+    Write-Step "Cleaning $Label port ${Port}: $names"
+    $visited = @{}
+    foreach ($ownerId in $ownerIds) {
+        Stop-ProcessTree -ProcessId ([int]$ownerId) -Visited $visited
+    }
+
+    $deadline = (Get-Date).AddSeconds(5)
+    while ((Get-Date) -lt $deadline) {
+        if ((Get-PortListenerProcessIds -Port $Port).Count -eq 0) {
+            Write-Step "$Label port $Port is free."
+            return
+        }
+        Start-Sleep -Milliseconds 200
+    }
+    Write-Warning "$Label port $Port is still occupied after cleanup."
+}
+
+function Stop-StaleRuntimeWorkers {
+    param([string]$RepositoryRoot)
+
+    $rootForMatch = ''
+    if ($RepositoryRoot) {
+        $rootForMatch = ($RepositoryRoot -replace '/', '\').TrimEnd('\')
+    }
+    $patterns = @(
+        'app.services.yolo_worker',
+        'app.services.audio_worker'
+    )
+    $workers = @()
+    try {
+        $workers = @(
+            Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" -ErrorAction SilentlyContinue |
+                Where-Object {
+                    $cmd = $_.CommandLine
+                    if (-not $cmd) {
+                        return $false
+                    }
+                    $matchesWorker = $false
+                    foreach ($pattern in $patterns) {
+                        if ($cmd -like "*$pattern*") {
+                            $matchesWorker = $true
+                            break
+                        }
+                    }
+                    if (-not $matchesWorker) {
+                        return $false
+                    }
+                    if (-not $rootForMatch) {
+                        return $true
+                    }
+                    return ($cmd -replace '/', '\') -like "*$rootForMatch*"
+                }
+        )
+    } catch {
+        Write-Warning "Failed to enumerate runtime workers: $($_.Exception.Message)"
+        return
+    }
+
+    if (-not $workers -or $workers.Count -eq 0) {
+        return
+    }
+
+    $visited = @{}
+    foreach ($worker in $workers) {
+        Write-Step "Cleaning stale runtime worker PID $($worker.ProcessId): $($worker.CommandLine)"
+        Stop-ProcessTree -ProcessId ([int]$worker.ProcessId) -Visited $visited
     }
 }
 
@@ -361,6 +535,8 @@ $envPathPrefix = (Get-CondaPathEntries -Prefix $envPrefix) -join ';'
 
 $apiHost = Get-EnvValue -Path $envPath -Key "API_HOST" -DefaultValue "0.0.0.0"
 $apiPort = Get-EnvValue -Path $envPath -Key "API_PORT" -DefaultValue "8000"
+$mqttPort = Get-EnvValue -Path $envPath -Key "MQTT_PORT" -DefaultValue "1883"
+$yoloRtspOutput = Get-EnvValue -Path $envPath -Key "YOLO_RTSP_OUTPUT" -DefaultValue ""
 $audioEnabled = Get-BoolEnvValue -Path $envPath -Key "AUDIO_ENABLED" -DefaultValue $false
 $audioRtspInput = Get-EnvValue -Path $envPath -Key "AUDIO_RTSP_INPUT" -DefaultValue ""
 $audioRtspSource = Get-EnvValue -Path $envPath -Key "AUDIO_RTSP_SIM_SOURCE" -DefaultValue "sine"
@@ -369,6 +545,7 @@ $audioRtspLoop = Get-BoolEnvValue -Path $envPath -Key "AUDIO_RTSP_SIM_LOOP" -Def
 $audioRtspFreq = Get-EnvValue -Path $envPath -Key "AUDIO_RTSP_SIM_FREQ" -DefaultValue "1000"
 $audioRtspSampleRate = Get-EnvValue -Path $envPath -Key "AUDIO_RTSP_SIM_SAMPLE_RATE" -DefaultValue "16000"
 $audioRtspChannels = Get-EnvValue -Path $envPath -Key "AUDIO_RTSP_SIM_CHANNELS" -DefaultValue "1"
+$mediaGatewayEnabled = Get-BoolEnvValue -Path $envPath -Key "MEDIA_GATEWAY_ENABLED" -DefaultValue $false
 
 Write-Step "API host: $apiHost"
 Write-Step "API port: $apiPort"
@@ -397,6 +574,30 @@ $startMqtt = $Mode -in @('stack', 'mqtt')
 $startApi = $Mode -in @('stack', 'api')
 $startGui = $Mode -in @('stack', 'gui')
 $needMySql = $Mode -in @('stack', 'api', 'gui')
+$shouldEnsureLocalRtspAudio = (-not $SkipLocalRtspAudio) -and ($startApi -or $startGui) -and $audioEnabled -and (-not $mediaGatewayEnabled)
+$localRtspEndpoint = $null
+if ($shouldEnsureLocalRtspAudio) {
+    $localRtspEndpoint = Get-LocalRtspEndpoint -Url $audioRtspInput
+}
+
+if (-not $NoPortCleanup) {
+    if ($startMqtt) {
+        Stop-PortListeners -Port ([int]$mqttPort) -Label "MQTT"
+    }
+    if ($startApi) {
+        Stop-PortListeners -Port ([int]$apiPort) -Label "API"
+        $yoloRtspEndpoint = Get-RtspEndpoint -Url $yoloRtspOutput
+        if ($yoloRtspEndpoint) {
+            Stop-PortListeners -Port ([int]$yoloRtspEndpoint.Port) -Label "YOLO RTSP output"
+        }
+        Stop-StaleRuntimeWorkers -RepositoryRoot $serverRoot.Path
+    }
+    if ($localRtspEndpoint) {
+        Stop-PortListeners -Port ([int]$localRtspEndpoint.Port) -Label "Local RTSP audio"
+    }
+} else {
+    Write-Step "Port cleanup disabled by -NoPortCleanup."
+}
 
 if ($needMySql) {
     Start-MySqlService -PreferredName $MySqlServiceName
@@ -405,7 +606,7 @@ if ($needMySql) {
 if ($startMqtt) {
     $mosquittoPath = Get-MosquittoPath -Prefix $envPrefix
     if ($mosquittoPath) {
-        $mosquittoConf = "$envPrefix/Library/etc/mosquitto/mosquitto.conf"
+        $mosquittoConf = Get-MosquittoConfigPath -Prefix $envPrefix -ScriptsRoot $PSScriptRoot
         if (Test-Path $mosquittoConf) {
             $mqttCommand = "`"$mosquittoPath`" -c `"$mosquittoConf`" -v"
         } else {
@@ -418,9 +619,7 @@ if ($startMqtt) {
     }
 }
 
-$shouldEnsureLocalRtspAudio = (-not $SkipLocalRtspAudio) -and ($startApi -or $startGui) -and $audioEnabled
 if ($shouldEnsureLocalRtspAudio) {
-    $localRtspEndpoint = Get-LocalRtspEndpoint -Url $audioRtspInput
     if ($localRtspEndpoint) {
         if (Test-TcpEndpointListening -HostName $localRtspEndpoint.Host -Port $localRtspEndpoint.Port) {
             Write-Step "Local RTSP audio endpoint already listening: $audioRtspInput"
@@ -445,8 +644,13 @@ if ($shouldEnsureLocalRtspAudio) {
 }
 
 if ($startApi) {
-    $apiCommand = "`"$pythonPath`" -m uvicorn main:app --host `"$apiHost`" --port `"$apiPort`""
-    Start-ServerWindow -Title "API" -Command $apiCommand -WorkingDirectory $serverRootPath -EnvPrefix $envPrefix -EnvPathPrefix $envPathPrefix
+    $apiProbeHost = Get-ProbeHost -HostName $apiHost
+    if (Test-TcpEndpointListening -HostName $apiProbeHost -Port ([int]$apiPort)) {
+        Write-Warning "API endpoint already listening: ${apiProbeHost}:${apiPort}. Skip starting another API window."
+    } else {
+        $apiCommand = "`"$pythonPath`" -m uvicorn main:app --host `"$apiHost`" --port `"$apiPort`""
+        Start-ServerWindow -Title "API" -Command $apiCommand -WorkingDirectory $serverRootPath -EnvPrefix $envPrefix -EnvPathPrefix $envPathPrefix
+    }
 }
 
 if ($startGui) {

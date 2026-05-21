@@ -12,7 +12,7 @@ _cache = LatestCache[dict]()
 def set_latest_alarm(entity: AlarmRecord) -> None:
     if getattr(entity, 'id', None) is None:
         return
-    data = entity.dict()
+    data = entity.model_dump()
     data['id'] = int(entity.id)
     _cache.set(data)
 

@@ -47,6 +47,7 @@ class MQTTManager:
             settings (Settings): 全局配置。
         """
         self._settings = settings
+        self._enabled = bool(settings.mqtt_enabled)
         self._client = self._build_client(settings)
 
         self._lock = threading.Lock()
@@ -79,18 +80,16 @@ class MQTTManager:
             - 使用 `connect_async + loop_forever(retry_first_connection=True)`，可在 Broker
               未就绪时持续重试，避免“启动时连接失败后永远不再恢复”的问题。
         """
+        if not self._enabled:
+            return
         with self._lock:
             if self._loop_thread and self._loop_thread.is_alive():
                 return
 
-            broker = self._settings.mqtt_broker
-            port = int(self._settings.mqtt_port)
-            keepalive = 60
-
             try:
-                self._client.connect_async(broker, port, keepalive=keepalive)
+                self._connect_async()
             except Exception as exc:  # pragma: no cover - 依赖网络
-                logger.error('Failed to connect MQTT broker %s:%s: %s', broker, port, exc)
+                logger.error('Failed to connect MQTT broker %s:%s: %s', self._settings.mqtt_broker, self._settings.mqtt_port, exc)
                 return
 
             self._loop_thread = threading.Thread(
@@ -99,20 +98,47 @@ class MQTTManager:
                 daemon=True,
             )
             self._loop_thread.start()
-            logger.info('MQTT network loop started for %s:%s', broker, port)
+            logger.info('MQTT network loop started for %s:%s', self._settings.mqtt_broker, self._settings.mqtt_port)
+
+    def connect_foreground(self) -> bool:
+        """Connect for callers that drive the MQTT network loop themselves."""
+        if not self._enabled:
+            return True
+        if self._connected.is_set():
+            return True
+        with self._lock:
+            if self._connected.is_set():
+                return True
+            broker = self._settings.mqtt_broker
+            port = int(self._settings.mqtt_port)
+            try:
+                self._client.connect(broker, port, keepalive=60)
+            except Exception as exc:  # pragma: no cover - depends on broker
+                logger.warning('Failed to connect MQTT broker %s:%s: %s', broker, port, exc)
+                return False
+            logger.info('MQTT foreground connection opened for %s:%s', broker, port)
+            return True
+
+    def loop_once(self, timeout: float = 0.1) -> int:
+        if not self._enabled:
+            return mqtt.MQTT_ERR_SUCCESS
+        return int(self._client.loop(timeout=max(0.0, float(timeout))))
 
     def disconnect(self) -> None:
         """关闭 MQTT 连接并停止网络循环。"""
         with self._lock:
+            if not self._enabled:
+                return
             if not self._loop_thread:
                 return
             self._client.disconnect()
             self._connected.clear()
             logger.info('MQTT disconnect requested')
 
-    def apply_settings(self, settings: Settings) -> None:
+    def apply_settings(self, settings: Settings, *, start_loop_thread: bool = True) -> None:
         """Apply new settings and reconnect to broker if needed."""
         with self._lock:
+            self._enabled = bool(settings.mqtt_enabled)
             rebuild = (self._settings.app_name or '') != (settings.app_name or '')
             self._settings = settings
             if rebuild:
@@ -125,19 +151,21 @@ class MQTTManager:
                     self._client.username_pw_set(username, settings.mqtt_password or None)
                 else:
                     self._client.username_pw_set(None)
+            if not self._enabled:
+                self._connected.clear()
+                self._loop_thread = None
+                return
         # Force reconnect with updated broker/port
         try:
             self._client.disconnect()
         except Exception:
             pass
         try:
-            broker = self._settings.mqtt_broker
-            port = int(self._settings.mqtt_port)
-            self._client.connect_async(broker, port, keepalive=60)
+            self._connect_async()
         except Exception:
             logger.exception('Failed to refresh MQTT connection')
         with self._lock:
-            if not (self._loop_thread and self._loop_thread.is_alive()):
+            if start_loop_thread and not (self._loop_thread and self._loop_thread.is_alive()):
                 self._loop_thread = threading.Thread(
                     target=lambda: self._client.loop_forever(retry_first_connection=True),
                     name='mqtt-loop',
@@ -187,6 +215,9 @@ class MQTTManager:
         Returns:
             bool: 发布是否成功。
         """
+        if not self._enabled:
+            logger.debug('MQTT publish skipped because MQTT is disabled')
+            return False
         if not self._connected.wait(timeout=2):
             logger.warning('MQTT publish skipped, broker not connected')
             return False
@@ -201,6 +232,8 @@ class MQTTManager:
     @property
     def is_connected(self) -> bool:
         """返回当前连接状态。"""
+        if not self._enabled:
+            return True
         return self._connected.is_set()
 
     # -- Internal callbacks -------------------------------------------------
@@ -260,5 +293,11 @@ class MQTTManager:
                 handler(context)
             except Exception:  # pragma: no cover - 调用方处理
                 logger.exception('Failed to handle MQTT message on %s', message.topic)
+                logger.exception('Failed to handle MQTT message on %s', message.topic)
         else:
             logger.debug('No handler registered for topic %s', message.topic)
+
+    def _connect_async(self) -> None:
+        broker = self._settings.mqtt_broker
+        port = int(self._settings.mqtt_port)
+        self._client.connect_async(broker, port, keepalive=60)

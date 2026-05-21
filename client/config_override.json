@@ -1,0 +1,19 @@
+{
+  "ENABLED_SENSOR_TYPES": [
+    "temperature",
+    "humidity",
+    "smoke",
+    "co",
+    "h2s",
+    "o2",
+    "ch4",
+    "photoelectric",
+    "bms"
+  ],
+  "SENSOR_POLL_DELAY": 0.3,
+  "SENSOR_RETRY_DELAY": 0.05,
+  "MAX_SENSOR_ATTEMPTS": 2,
+  "LOOP_IDLE_DELAY": 1.5,
+  "BMS_POLL_INTERVAL": 2.0,
+  "SENSOR_FAILURE_BACKOFF_SECONDS": 8.0
+}

@@ -29,11 +29,14 @@ from sqlmodel import select
 from app.core.config import Settings
 from app.db.audio_thresholds import AudioThreshold
 from app.db.models import AudioData
-from app.db.session import session_scope
+from app.ipc import IPCUnavailableError
 from app.mqtt import MQTTManager
 from app.services.audio_metrics import compute_spectral_metrics
-from app.services.data_service import DataService
 from app.services.alarm_publisher import build_alarm_event, publish_alarm_event
+
+if False:  # pragma: no cover
+    from app.runtime.db_worker import DBWorker
+    from app.runtime.telemetry_bridge import TelemetryBridgeClient
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +99,20 @@ def _redact_rtsp_url(url: str) -> str:
         return url
 
 
+def _next_rtsp_failure_backoff(
+    current_seconds: float,
+    *,
+    initial_seconds: float,
+    max_seconds: float,
+) -> float:
+    """Return bounded exponential backoff for offline RTSP sources."""
+    initial = max(1.0, float(initial_seconds or 1.0))
+    maximum = max(initial, float(max_seconds or initial))
+    if current_seconds <= 0:
+        return initial
+    return min(maximum, max(initial, current_seconds * 2.0))
+
+
 def _safe_filename_part(text: str, *, max_len: int = 40) -> str:
     """Convert arbitrary text into a filesystem-safe short token."""
     cleaned = ''.join(ch if ch.isalnum() or ch in {'-', '_'} else '_' for ch in (text or ''))
@@ -106,36 +123,48 @@ def _safe_filename_part(text: str, *, max_len: int = 40) -> str:
 class AudioMonitorService:
     """Continuously record RTSP audio and persist into database."""
 
-    def __init__(self, settings: Settings, mqtt_manager: Optional[MQTTManager] = None):
+    def __init__(
+        self,
+        settings: Settings,
+        mqtt_manager: Optional[MQTTManager] = None,
+        telemetry_client: Optional["TelemetryBridgeClient"] = None,
+        db_worker: Optional["DBWorker"] = None,
+    ):
         self._settings = settings
         self._mqtt = mqtt_manager
+        self._telemetry = telemetry_client
+        self._db_worker = db_worker
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
         self._metrics: Deque[Dict[str, float]] = deque(maxlen=200)
         self._last_window: Optional[Dict[str, float]] = None
         self._lock = threading.Lock()
+        self._last_store_at = 0.0
         self._last_spectral_warning_at = 0.0
         self._last_thresholds_zero_warning_at = 0.0
+        self._last_telemetry_unavailable_log = 0.0
+        self._telemetry_unavailable_suppressed = 0
         self._metrics_path = Path(__file__).resolve().parents[2] / 'logs' / 'audio_metrics.json'
 
     @property
     def enabled(self) -> bool:
-        return bool(self._settings.audio_enabled and self._settings.audio_rtsp_input)
+        return bool(self._settings.audio_enabled and self._settings.resolve_audio_rtsp_input())
 
     def start(self) -> None:
         logger.debug(
             'Audio monitor start requested enabled=%s rtsp_set=%s',
             bool(self._settings.audio_enabled),
-            bool(self._settings.audio_rtsp_input),
+            bool(self._settings.resolve_audio_rtsp_input()),
         )
         if not self.enabled:
             logger.warning(
                 'Audio monitor not started: AUDIO_ENABLED=%s AUDIO_RTSP_INPUT_set=%s',
                 bool(self._settings.audio_enabled),
-                bool(self._settings.audio_rtsp_input),
+                bool(self._settings.resolve_audio_rtsp_input()),
             )
             return
-        self._load_latest_thresholds()
+        if self._telemetry is None:
+            self._load_latest_thresholds()
         if self._thread and self._thread.is_alive():
             logger.debug('Audio monitor thread already running')
             return
@@ -166,6 +195,29 @@ class AudioMonitorService:
         self.start()
 
     # Internal -------------------------------------------------------------
+    def _log_telemetry_unavailable(self, exc: BaseException) -> None:
+        """Log missing telemetry bridge without flooding audio capture logs."""
+        now = time.monotonic()
+        if now - self._last_telemetry_unavailable_log < 10.0:
+            self._telemetry_unavailable_suppressed += 1
+            return
+
+        suppressed = self._telemetry_unavailable_suppressed
+        self._telemetry_unavailable_suppressed = 0
+        self._last_telemetry_unavailable_log = now
+        if suppressed:
+            logger.warning(
+                'Telemetry bridge unavailable; skipping audio clip until API pipe is ready: %s '
+                '(suppressed=%d)',
+                exc,
+                suppressed,
+            )
+        else:
+            logger.warning(
+                'Telemetry bridge unavailable; skipping audio clip until API pipe is ready: %s',
+                exc,
+            )
+
     def _run(self) -> None:
         try:
             sample_rate = int(self._settings.audio_sample_rate or 16000)
@@ -177,7 +229,7 @@ class AudioMonitorService:
         except (TypeError, ValueError):
             segment_seconds = 1.0
             logger.warning('Invalid audio_window_seconds, fallback to %.2f', segment_seconds)
-        url = (self._settings.audio_rtsp_input or '').strip()
+        url = self._settings.resolve_audio_rtsp_input()
         url_for_log = _redact_rtsp_url(url)
         logger.warning(
             'Audio recording loop started: url=%s sample_rate=%s segment_seconds=%.2f',
@@ -185,6 +237,8 @@ class AudioMonitorService:
             sample_rate,
             segment_seconds,
         )
+        failure_backoff = 0.0
+        failure_count = 0
 
         while not self._stop_event.is_set():
             tmp_path = ''
@@ -198,9 +252,30 @@ class AudioMonitorService:
                     duration_seconds=segment_seconds,
                     output_path=tmp_path,
                 ):
-                    self._wait(2.0)
+                    failure_count += 1
+                    failure_backoff = _next_rtsp_failure_backoff(
+                        failure_backoff,
+                        initial_seconds=getattr(
+                            self._settings,
+                            'audio_rtsp_failure_backoff_initial_seconds',
+                            10.0,
+                        ),
+                        max_seconds=getattr(
+                            self._settings,
+                            'audio_rtsp_failure_backoff_max_seconds',
+                            120.0,
+                        ),
+                    )
+                    logger.warning(
+                        'Audio RTSP unavailable; backing off %.1fs before retry (failures=%d)',
+                        failure_backoff,
+                        failure_count,
+                    )
+                    self._wait(failure_backoff)
                     continue
                 capture_elapsed = time.perf_counter() - capture_start
+                failure_backoff = 0.0
+                failure_count = 0
 
                 file_size = self._safe_file_size(tmp_path)
                 metrics: Dict[str, float] = {
@@ -216,6 +291,9 @@ class AudioMonitorService:
                 evaluation = self._evaluate_thresholds(metrics, thresholds, wav_path=tmp_path)
                 should_store = bool(evaluation.get('should_store'))
                 exceeded = evaluation.get('exceeded') or []
+                if should_store and not self._store_interval_allows():
+                    metrics['store_throttled'] = 1.0
+                    should_store = False
                 metrics['threshold_hit'] = 1.0 if should_store else 0.0
                 with self._lock:
                     self._metrics.append(metrics)
@@ -241,6 +319,8 @@ class AudioMonitorService:
                 if should_store:
                     logger.warning('Audio threshold hit: exceeded=%s thresholds=%s', exceeded, thresholds)
                     self._store_wav_file(tmp_path, metrics)
+                elif metrics.get('store_throttled'):
+                    logger.info('Audio window skipped by store interval: exceeded=%s thresholds=%s', exceeded, thresholds)
                 else:
                     logger.info('Audio window skipped (below thresholds): thresholds=%s', thresholds)
             except Exception:  # pragma: no cover - background thread safety
@@ -399,12 +479,29 @@ class AudioMonitorService:
             logger.exception('Failed to read/encode wav file: %s', wav_path)
             return
 
-        try:
-            with session_scope() as session:
-                service = DataService(session)
-                latest_rfid = service.get_latest_rfid_card()
-                if latest_rfid:
-                    location = latest_rfid
+        if self._telemetry is not None:
+            try:
+                self._telemetry.emit(
+                    kind='telemetry.audio.clip',
+                    source='audio',
+                    body={
+                        'timestamp': timestamp.isoformat(),
+                        'device_id': device_id,
+                        'location': location,
+                        'audio_name': audio_name,
+                        'audio_hex': wav_bytes.hex(),
+                        'metrics': dict(metrics),
+                    },
+                )
+            except IPCUnavailableError as exc:
+                self._log_telemetry_unavailable(exc)
+            except Exception:
+                logger.exception('Failed to emit audio telemetry %s', audio_name)
+            return
+
+        if self._db_worker is not None:
+            try:
+                location = self._db_worker.call_data_service('get_latest_rfid_card') or location
                 entity = AudioData(
                     timestamp=timestamp,
                     device_id=device_id,
@@ -412,18 +509,8 @@ class AudioMonitorService:
                     audio_data=wav_bytes,
                     location=location,
                 )
-                logger.debug('Audio DB insert start name=%s', audio_name)
-                stored = service.create_audio_data([entity], commit=False)
+                stored = self._db_worker.call_data_service('create_audio_data', [entity], commit=True)
                 stored_id = stored[0].id if stored else None
-            logger.warning(
-                'Audio snippet stored: id=%s name=%s device=%s location=%s bytes=%s',
-                stored_id,
-                audio_name,
-                device_id,
-                location,
-                len(wav_bytes),
-            )
-            try:
                 event = build_alarm_event(
                     source='audio_threshold',
                     timestamp=timestamp,
@@ -442,11 +529,16 @@ class AudioMonitorService:
                     },
                 )
                 publish_alarm_event(self._mqtt, event)
-                logger.debug('Audio alarm event published id=%s', stored_id)
+                return
             except Exception:
-                logger.exception('Audio alarm publish failed id=%s', stored_id)
-        except Exception:  # pragma: no cover - DB dependency
-            logger.exception('Failed to store audio snippet %s', audio_name)
+                logger.exception('Failed to store audio snippet %s', audio_name)
+                return
+
+        logger.error(
+            'Skipping audio snippet persistence because db_worker is not configured name=%s device=%s',
+            audio_name,
+            device_id,
+        )
 
     @staticmethod
     def _inspect_wav_file(path: str) -> Dict[str, float]:
@@ -550,13 +642,18 @@ class AudioMonitorService:
 
     def _load_latest_thresholds(self) -> None:
         """Load persisted thresholds from DB and apply to in-memory settings."""
-        try:
-            with session_scope() as session:
-                latest = session.exec(
-                    select(AudioThreshold)
-                    .order_by(AudioThreshold.updated_at.desc())
-                    .limit(1)
-                ).first()
+        if self._telemetry is not None:
+            return
+        if self._db_worker is not None:
+            try:
+                def _load(session):
+                    return session.exec(
+                        select(AudioThreshold)
+                        .order_by(AudioThreshold.updated_at.desc())
+                        .limit(1)
+                    ).first()
+
+                latest = self._db_worker.call(_load)
                 if not latest:
                     logger.debug('No audio thresholds found in DB')
                     return
@@ -568,17 +665,11 @@ class AudioMonitorService:
                     flux=latest.flux,
                     rms=latest.rms,
                 )
-                logger.warning(
-                    'Loaded audio thresholds from DB: centroid=%s bandwidth=%s rolloff=%s flatness=%s flux=%s rms=%s',
-                    latest.centroid,
-                    latest.bandwidth,
-                    latest.rolloff,
-                    latest.flatness,
-                    latest.flux,
-                    latest.rms,
-                )
-        except Exception:  # pragma: no cover - DB dependency
-            logger.exception('Failed to load audio thresholds from DB')
+                return
+            except Exception:
+                logger.exception('Failed to load audio thresholds from DB')
+                return
+        logger.warning('Skipping audio threshold load because db_worker is not configured')
 
     def _get_thresholds(self) -> Dict[str, float]:
         """Snapshot current threshold settings."""
@@ -604,10 +695,10 @@ class AudioMonitorService:
 
         active_thresholds = {k: v for k, v in thresholds.items() if float(v) > 0.0}
         if not active_thresholds:
-            # All thresholds == 0 => record everything.
+            # All thresholds == 0 => record everything, limited by AUDIO_STORE_MIN_INTERVAL_SECONDS.
             metrics['thresholds_all_zero'] = 1.0
             self._warn_throttled(
-                'All audio thresholds are 0; storing every audio window',
+                'All audio thresholds are 0; audio clips are stored at the configured interval',
                 attr='_last_thresholds_zero_warning_at',
             )
             return {'should_store': True, 'exceeded': ['thresholds_all_zero']}
@@ -653,6 +744,23 @@ class AudioMonitorService:
                     exceeded.append(key)
 
         return {'should_store': bool(exceeded), 'exceeded': exceeded}
+
+    def _store_interval_allows(self) -> bool:
+        """Throttle database writes while still computing every audio window."""
+        if bool(getattr(self._settings, 'audio_debug_store_all', False)):
+            return True
+        try:
+            min_interval = max(0.0, float(getattr(self._settings, 'audio_store_min_interval_seconds', 10.0) or 0.0))
+        except (TypeError, ValueError):
+            min_interval = 10.0
+        if min_interval <= 0.0:
+            self._last_store_at = time.time()
+            return True
+        now = time.time()
+        if now - self._last_store_at < min_interval:
+            return False
+        self._last_store_at = now
+        return True
 
     def _warn_throttled(self, message: str, *, attr: str, interval: float = 60.0) -> None:
         now = time.time()

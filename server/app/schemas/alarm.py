@@ -1,19 +1,12 @@
-"""报警记录模型。"""
-
 from __future__ import annotations
 
 from datetime import datetime
-from typing import List, Optional
+from typing import List
 
 from sqlmodel import SQLModel
 
-from app.db.models import AlarmType
 
-
-class AlarmRecordRead(SQLModel):
-    """报警记录读取模型。"""
-
-    id: int
+class AlarmRecordBase(SQLModel):
     timestamp: datetime
     sensor_key: str
     sensor_name: str
@@ -21,29 +14,20 @@ class AlarmRecordRead(SQLModel):
     unit: str
     min_threshold: float
     max_threshold: float
-    alarm_type: AlarmType
-    is_handled: bool
+    alarm_type: str
+    is_handled: bool = False
     location: str
 
 
-class AlarmRecordCreate(SQLModel):
-    """报警记录创建模型。"""
+class AlarmRecordCreate(AlarmRecordBase):
+    pass
 
-    timestamp: Optional[datetime] = None
-    device_id: Optional[str] = None
-    sensor_key: str
-    sensor_name: str
-    value: float
-    unit: str
-    min_threshold: float
-    max_threshold: float
-    alarm_type: AlarmType
-    is_handled: bool = False
-    location: str = ''
+
+class AlarmRecordRead(AlarmRecordBase):
+    id: int
 
 
 class AlarmRecordPage(SQLModel):
-    """带总条数的报警分页响应。"""
-
     total: int
     items: List[AlarmRecordRead]
+

@@ -1,88 +1,123 @@
-"""索道 PLC（西门子 S7-200 SMART）点表与校验逻辑。
-
-来源：`机器人索道通信格式与点表.xlsx`（Sheet1）。
-
-要点：
-- PLC 作为 Modbus TCP 服务器（默认 IP：192.168.2.1）。
-- 200Smart 对应 Modbus Holding Register 地址换算：字节地址 / 2 + 1（人类 1-based），
-  代码实现时通常使用 0-based 地址：字节地址 / 2。
-"""
+"""Cableway PLC point table and validation helpers."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, Union
 
 
 VW_COMMAND: int = 2404
 VW_ESTOP: int = 2410
 VW_HEARTBEAT: int = 2414
+VW_CURRENT_TASK: int = 2432
+
+VD_CURRENT_POSITION: int = 2244
+VD_CURRENT_SPEED: int = 2248
+VD_TARGET_POSITION: int = 2252
+
+VB_FAULT_WINDOW_START: int = 2880
+VB_FAULT_WINDOW_END: int = 2889
+VB_STATUS_WINDOW_START: int = 2888
+VB_STATUS_WINDOW_END: int = 2909
+
+TOTAL_FAULT_KEY: str = "gz_total_fault"
 
 HEARTBEAT_VALUES: Tuple[int, int] = (0, 5)
 
 
 CONTROL_COMMANDS: Dict[int, str] = {
-    101: '回原点',
-    201: '自动往复正向启动',
-    202: '自动往复反向启动',
-    301: '定位启动',
-    401: '点动前进',
-    402: '点动后退',
-    88: '停止',
-    66: '故障复位',
-    0: '无命令',
+    101: "home",
+    201: "auto_forward",
+    202: "auto_reverse",
+    301: "position_start",
+    401: "jog_forward",
+    402: "jog_reverse",
+    88: "stop",
+    66: "fault_reset",
+    0: "no_command",
 }
 
 
 @dataclass(frozen=True)
-class FloatParamSpec:
+class FloatStatusSpec:
     key: str
     name: str
     vd_address: int
-    min_value: Optional[float]
-    max_value: Optional[float]
     unit: str
-    note: str = ''
+    min_value: Optional[float] = None
+    max_value: Optional[float] = None
 
 
-FLOAT_PARAMS: Dict[str, FloatParamSpec] = {
-    'cs_speed_limit': FloatParamSpec('cs_speed_limit', 'CS速度上限', 2048, 0.0, 1.0, '米/秒', '范围 0~1'),
-    'cs_remote_position': FloatParamSpec('cs_remote_position', 'CS远控位置', 2044, 0.0, 999.0, '米', '范围0~999.0'),
-    'cs_decel_distance': FloatParamSpec('cs_decel_distance', 'CS减速距离', 2036, 0.0, 999.0, '米', '范围0~999.0'),
-    'cs_max_speed': FloatParamSpec('cs_max_speed', 'CS最大速度', 2032, 0.0, 1.0, '米/秒', '0~1.0'),
-    'cs_home_speed': FloatParamSpec('cs_home_speed', 'CS原点速度', 2028, 0.0, 0.6, '米/秒', '范围 0~0.6'),
-    'cs_manual_speed': FloatParamSpec('cs_manual_speed', 'CS手动速度', 2024, 0.0, 0.6, '米/秒', '范围 0~0.6'),
-    'cs_auto_speed': FloatParamSpec('cs_auto_speed', 'CS自动速度', 2020, 0.0, 0.6, '米/秒', '范围 0~0.6'),
-    'cs_pulse_equivalent': FloatParamSpec('cs_pulse_equivalent', 'CS脉冲当量', 2016, 0.0, 1.0, '米/PULL', '范围0.00~1'),
-    'cs_positive_limit': FloatParamSpec('cs_positive_limit', 'CS正限位', 2012, 0.0, 999.0, '米', '范围0~999.0'),
-    'cs_negative_limit': FloatParamSpec('cs_negative_limit', 'CS负限位', 2008, -10.0, 0.0, '米', '范围0~-10.0'),
-    'cs_allowed_deviation': FloatParamSpec('cs_allowed_deviation', 'CS允许偏差', 2004, 0.0, 1.0, '米', '范围0~1.0'),
-    'cs_end_position': FloatParamSpec('cs_end_position', 'CS终点位置', 2000, 0.0, 999.0, '米', '范围0~999.0'),
+@dataclass(frozen=True)
+class WordStatusSpec:
+    key: str
+    name: str
+    vw_address: int
+    unit: str = ""
+
+
+@dataclass(frozen=True)
+class BitSpec:
+    key: str
+    name: str
+    byte_address: int
+    bit_index: int
+    note: str = ""
+
+
+STATUS_FLOATS: Dict[str, FloatStatusSpec] = {
+    "current_position_m": FloatStatusSpec("current_position_m", "Current position", VD_CURRENT_POSITION, "m", 0.0, 999.0),
+    "current_speed_mps": FloatStatusSpec("current_speed_mps", "Current speed", VD_CURRENT_SPEED, "m/s", 0.0, 0.6),
+    "target_position_m": FloatStatusSpec("target_position_m", "Target position", VD_TARGET_POSITION, "m", 0.0, 999.0),
 }
 
 
+STATUS_WORDS: Dict[str, WordStatusSpec] = {
+    "current_task_code": WordStatusSpec("current_task_code", "Current task", VW_CURRENT_TASK),
+}
+
+
+STATUS_BITS: Dict[str, BitSpec] = {
+    TOTAL_FAULT_KEY: BitSpec(TOTAL_FAULT_KEY, "Total fault", 2889, 7),
+    "zt_home_done": BitSpec("zt_home_done", "Home completed", 2909, 0),
+    "zt_position_done": BitSpec("zt_position_done", "Positioning completed", 2909, 1),
+}
+
+
+FAULT_BITS: Dict[str, BitSpec] = {
+    TOTAL_FAULT_KEY: STATUS_BITS[TOTAL_FAULT_KEY],
+    "gz_position_fault": BitSpec("gz_position_fault", "Position fault", 2884, 6),
+    "gz_home_fault": BitSpec("gz_home_fault", "Home fault", 2884, 5),
+    "gz_over_positive_limit": BitSpec("gz_over_positive_limit", "Positive overlimit", 2884, 3),
+    "gz_over_negative_limit": BitSpec("gz_over_negative_limit", "Negative overlimit", 2884, 2),
+    "gz_deviation_too_large": BitSpec("gz_deviation_too_large", "Deviation too large", 2884, 1),
+    "gz_setpoint_overrun": BitSpec("gz_setpoint_overrun", "Setpoint overrun", 2884, 0),
+    "gz_hard_limit": BitSpec("gz_hard_limit", "Hard limit", 2883, 2),
+    "gz_positive_limit_estop": BitSpec("gz_positive_limit_estop", "Positive limit estop", 2883, 1),
+    "gz_negative_limit_estop": BitSpec("gz_negative_limit_estop", "Negative limit estop", 2883, 0),
+    "gz_estop_fault": BitSpec("gz_estop_fault", "Estop fault", 2882, 2),
+    "gz_estop_inhibit_start": BitSpec("gz_estop_inhibit_start", "Estop inhibits start", 2882, 1),
+    "gz_robot_estop": BitSpec("gz_robot_estop", "Robot estop", 2882, 0),
+    "gz_general_fault": BitSpec("gz_general_fault", "General fault", 2880, 5),
+    "gz_counterweight_low": BitSpec("gz_counterweight_low", "Counterweight low", 2880, 4),
+    "gz_counterweight_high": BitSpec("gz_counterweight_high", "Counterweight high", 2880, 3),
+    "gz_overspeed": BitSpec("gz_overspeed", "Overspeed", 2880, 2),
+    "gz_vfd_fault": BitSpec("gz_vfd_fault", "VFD fault", 2880, 1),
+    "gz_brake_fault": BitSpec("gz_brake_fault", "Brake fault", 2880, 0),
+}
+
+
+FLOAT_PARAMS: Dict[str, object] = {}
+WORD_PARAMS: Dict[str, object] = {}
+PARAM_SPECS: Dict[str, object] = {}
+
+
 def validate_control_command_code(code: int) -> int:
-    """校验 VW2404 控制命令码。"""
     value = int(code)
     if value not in CONTROL_COMMANDS:
-        raise ValueError(f'不支持的控制命令码: {value}')
+        raise ValueError(f"Unsupported control command code: {value}")
     return value
 
 
-def validate_param_updates(params: Dict[str, float]) -> Dict[str, float]:
-    """校验参数更新请求（按点表范围限制）。"""
-    if not isinstance(params, dict) or not params:
-        raise ValueError('params 必须是非空对象')
-
-    validated: Dict[str, float] = {}
-    for key, raw_value in params.items():
-        spec = FLOAT_PARAMS.get(str(key))
-        if not spec:
-            raise ValueError(f'未知参数: {key}')
-        value = float(raw_value)
-        if spec.min_value is not None and value < spec.min_value:
-            raise ValueError(f'{key} 低于下限 {spec.min_value}: {value}')
-        if spec.max_value is not None and value > spec.max_value:
-            raise ValueError(f'{key} 高于上限 {spec.max_value}: {value}')
-        validated[str(key)] = value
-    return validated
+def validate_param_updates(params: Dict[str, float]) -> Dict[str, Union[float, int]]:
+    raise ValueError("set_params is no longer supported for the cableway PLC")

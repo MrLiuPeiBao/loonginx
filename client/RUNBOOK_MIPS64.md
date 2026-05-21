@@ -9,7 +9,7 @@ cd /opt/loonginx-client
 
 - 日志直接显示在终端
 - 报错最直观
-- 适合首次排查 MQTT、PLC、配置和串口问题
+- 适合首次排查 MQTT、配置和串口问题
 
 ### 2.2 后台启动
 
@@ -145,5 +145,4 @@ systemctl stop loonginx-client
 ```bash
 systemctl disable loonginx-client
 ```
-
 

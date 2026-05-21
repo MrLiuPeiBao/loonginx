@@ -33,5 +33,6 @@ class ImageDataRead(ImageDataBase):
 class ImageDataPage(SQLModel):
     """带总条数的图像分页响应。"""
 
+    status: str = 'ok'
     total: int
     items: List[ImageDataRead]

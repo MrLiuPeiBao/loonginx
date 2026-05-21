@@ -1,7 +1,7 @@
 # 下位机说明
 
 ## 1. 系统做什么（一句话）
-下位机负责在 loongarch64 设备上轮询传感器/PLC/RFID，封装成统一消息，通过 MQTT 上报到上位机，并接收上位机下发的控制命令回执。
+下位机负责在 loongarch64 设备上轮询传感器/BMS/RFID/IO 板光电输入，封装成统一消息，通过 MQTT 上报到上位机，并接收上位机下发的串口控制命令回执。IO 板还负责运行灯、通讯灯、充放电灯、相机灯、避障灯和声光报警器控制。
 
 ## 2. 运行环境与启动方式
 - 运行环境：loongarch64 GNU/Linux（小端），Python 3.9。
@@ -14,15 +14,20 @@ cd "client"
 python3.9 "main.py"
 ```
 
+开发板守护启动：
+```bash
+/opt/loonginx-client/run_client_forever.sh
+```
+
 ## 3. 非专业视角的数据流
-1) 传感器/BMS/PLC/RFID 通过串口/Modbus 读取原始值。
+1) 传感器/BMS/RFID/IO 板通过串口/Modbus 读取原始值。
 2) 统一封装为消息（含时间戳、schema 版本、payload_type）。
-3) 按主题发布 MQTT（如 `sensors/data`、`cableway/status`）。
-4) 接收上位机控制命令 → 串口/PLC 执行 → 回执上报。
+3) 按主题发布 MQTT（如 `sensors/data`、`sensors/bms`、`sensors/rfid`）。
+4) 接收上位机控制命令 → 串口执行 → 回执上报。
 5) MQTT 断连时可离线缓存；断连过久自动进入降频模式，降低资源消耗。
 
 对接提示：
-- 上位机历史查询接口 `/api/sensors`、`/api/bms`、`/api/rfid`、`/api/commands`、`/api/cableway/status`、`/api/command-requests`、`/api/alarms`、`/api/images`、`/api/audio`、`/api/metal-anomaly` 返回 `{ "total": 总条数, "items": 当前页数据 }`。
+- 上位机历史查询接口 `/api/sensors`、`/api/bms`、`/api/rfid`、`/api/commands`、`/api/command-requests`、`/api/alarms`、`/api/images`、`/api/audio`、`/api/metal-anomaly` 返回 `{ "total": 总条数, "items": 当前页数据 }`。
 
 ## 4. 配置说明（`client/.env`）
 > 以下为常用项，实际以 `client/config.py` 为准。
@@ -44,17 +49,32 @@ python3.9 "main.py"
 - `SERIAL_PORT` / `SERIAL_BAUDRATE` / `SERIAL_TIMEOUT`
 - `SERIAL_DIRECT_RETRIES` / `SERIAL_DIRECT_RESPONSE_DELAY` / `SERIAL_DIRECT_TIMEOUT`
 - `RFID_SERIAL_PORT` / `RFID_SERIAL_BAUDRATE`
+- `IO_BOARD_ENABLED` / `IO_BOARD_ADDRESS`：IO 板启用开关与站地址，默认站地址 `25`。
 
-**PLC（索道）**
-- `PLC_ENABLED` / `PLC_HOST` / `PLC_PORT` / `PLC_UNIT_ID`
-- `PLC_TIMEOUT` / `PLC_CONNECT_TIMEOUT`
-- `PLC_STATUS_POLL_INTERVAL` / `PLC_HEARTBEAT_INTERVAL` / `PLC_COMMAND_PULSE_SECONDS`
-- `PLC_EVEN_BYTE_IS_HIGH` / `PLC_FLOAT_WORD_ORDER` / `PLC_FLOAT_BYTE_ORDER`
+**摄像头/IO 输出**
+- `CAMERA_TARGET` 或 `CAMERA_IP`：摄像头探测目标，默认 `192.168.0.101`。
+- `CAMERA_PORT` / `CAMERA_TIMEOUT`：摄像头 TCP 探测端口与超时，默认 `554` / `1.0` 秒。
+- 程序启动后点亮运行灯、通讯灯、充放电灯；摄像头可访问时点亮相机灯；光电传感器检测到障碍时点亮避障灯；本地下位机阈值触发时点亮声光报警器。
+
+**本地下位机阈值**
+- `LOCAL_SENSOR_THRESHOLDS`：本地声光报警阈值，支持 JSON 或 `sensor=min:max` 逗号格式。
+- 默认阈值与上位机虚拟客户端一致：温度 `10..35`、湿度 `20..80`、压力 `90..110`、烟雾 `0..5`、CO `0..35`、O2 `19.5..23.5`、H2S `0..10`、CH4 `0..1`。
+- `ALARM_OUTPUT_HOLD_SECONDS`：收到上位机 `sensors/alarms` 告警广播后声光报警器保持时间，默认 `30` 秒。
 
 **轮询节奏**
 - `SENSOR_POLL_DELAY` / `SENSOR_RETRY_DELAY` / `MAX_SENSOR_ATTEMPTS`
 - `LOOP_IDLE_DELAY` / `BMS_POLL_INTERVAL`
+- `ENV_SENSOR_GROUP_INTERVAL` / `GAS_SENSOR_GROUP_INTERVAL`
+- `BMS_FAST_GROUP_INTERVAL` / `BMS_SLOW_GROUP_INTERVAL`
 - `MESSAGE_SCHEMA_VERSION`
+- RS-485/Modbus RTU 总线慢、CRC 错、地址错位或假死排障，见 `docs/rs485_modbus_optimization_north_star.md`。
+
+当前默认策略偏向“稳定优先”：
+
+- 环境组与气体组按整组轮询，不再一次只轮一个气体传感器。
+- 现场 `/dev/ttyS6` 存在首包易超时现象；direct 传感器在单次业务读取内默认发起 2 次 direct 尝试，光电读取默认外层补问 1 次，`SENSOR_RETRY_DELAY` 默认 `0.05s`。
+- 气体传感器默认增加 direct 重试与单次超时预算，优先保证 30~60 秒内能拿到一轮完整数据。
+- BMS 读取失败时保留最近一次成功字段，减少上报空缺。
 
 **运行期覆盖文件**
 - `client/config_override.json`：下位机热更新覆盖文件（可由上位机下发）。
@@ -70,7 +90,7 @@ python3.9 "main.py"
 ## 6. 目录结构（面向理解）
 - `client/main.py`：主入口与主循环（采集/上报/命令处理）。
 - `client/config.py`：环境变量解析与默认配置。
-- `client/communication/`：MQTT、串口、PLC、RFID 适配层。
+- `client/communication/`：MQTT、串口、RFID 适配层。
 - `client/sensors/`：具体传感器驱动与解析逻辑。
 - `client/utils/`：解析/降级/消息封装等小工具。
 - `client/tests/`：单元测试。
@@ -78,11 +98,10 @@ python3.9 "main.py"
 ## 7. 代码文件与函数说明（概要）
 > 这里只给出概览；完整的“逐文件/逐函数”说明见 `client/PLANNING.md`。
 
-- `client/main.py`：`SensorGateway` 负责初始化、轮询、上报、命令回执与 PLC 状态采集。
-- `client/config.py`：`.env` 读取与默认配置；提供 MQTT/串口/PLC/BMS 等配置字典。
+- `client/main.py`：`SensorGateway` 负责初始化、轮询、上报与命令回执。
+- `client/config.py`：`.env` 读取与默认配置；提供 MQTT/串口/RFID/BMS 等配置字典。
 - `client/communication/mqtt_client.py`：MQTT 连接、订阅、发布、离线队列管理与 QoS 映射。
 - `client/communication/serial_manager.py`：统一 Modbus RTU 读写与原始命令发送，带 CRC 校验。
-- `client/communication/cableway_plc.py`：PLC Modbus TCP 读写与心跳/脉冲控制。
 - `client/communication/rfid_reader.py`：RFID 串口读卡循环。
 - `client/sensors/*`：温湿度/气体/烟雾/BMS 等传感器读取与解析。
 - `client/utils/*`：解析函数、降级状态机、消息字段补齐。
@@ -90,4 +109,7 @@ python3.9 "main.py"
 ## 8. 常见问题（FAQ）
 - **设备资源紧张怎么办？** 使用 `MQTT_DEGRADE_*` 与 `SENSOR_*` 间隔配置，降低轮询频率。
 - **MQTT 断链会丢数据吗？** 可开启离线缓存，`latest` 模式只保留每主题最新数据。
-- **PLC 字节序不一致怎么办？** 调整 `PLC_EVEN_BYTE_IS_HIGH` / `PLC_FLOAT_WORD_ORDER` / `PLC_FLOAT_BYTE_ORDER`。
+## Runtime Scope
+
+- The client runtime is limited to sensor, BMS, RFID, command, config, and device hello traffic.
+- Cableway PLC control and status handling are no longer part of the client package.

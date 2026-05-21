@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
 import threading
 import time
@@ -11,6 +12,28 @@ from typing import Any, Optional
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
+
+
+def _prepend_env_path(name: str, value: str) -> None:
+    if not value or not os.path.isdir(value):
+        return
+    existing = os.environ.get(name, '')
+    entries = [item for item in existing.split(os.pathsep) if item]
+    normalized = {os.path.normcase(os.path.normpath(item)) for item in entries}
+    if os.path.normcase(os.path.normpath(value)) in normalized:
+        return
+    os.environ[name] = os.pathsep.join([value, *entries])
+
+
+def _configure_gstreamer_env() -> None:
+    prefix = os.environ.get('CONDA_PREFIX')
+    if not prefix:
+        return
+    _prepend_env_path('GST_PLUGIN_PATH', os.path.join(prefix, 'Library', 'lib', 'gstreamer-1.0'))
+    _prepend_env_path('GI_TYPELIB_PATH', os.path.join(prefix, 'Library', 'lib', 'girepository-1.0'))
+
+
+_configure_gstreamer_env()
 
 try:  # pragma: no cover - optional dependency
     import gi
@@ -178,7 +201,7 @@ class GStreamerRtspOutput(RtspOutput):
         self._appsrc: Optional[Any] = None
         self._lock = threading.Lock()
         self._frame_count = 0
-        self._start_time_ns: Optional[int] = None
+        self._last_push_warning_at = 0.0
         self._ready = threading.Event()
         self._mount_path = '/yolo'
         self._bind_host = '0.0.0.0'
@@ -193,9 +216,10 @@ class GStreamerRtspOutput(RtspOutput):
         if self._thread and self._thread.is_alive():
             return True
 
-        self._bind_host, self._bind_port, self._mount_path = _parse_rtsp_url(self._config.output_url)
+        url_host, self._bind_port, self._mount_path = _parse_rtsp_url(self._config.output_url)
+        self._bind_host = _resolve_server_bind_host(url_host)
+        _configure_gstreamer_env()
         Gst.init(None)
-        self._start_time_ns = None
 
         self._server = GstRtspServer.RTSPServer()
         self._server.props.service = str(self._bind_port)
@@ -215,10 +239,11 @@ class GStreamerRtspOutput(RtspOutput):
         self._thread.start()
 
         logger.info(
-            'GStreamer RTSP server ready on rtsp://%s:%s%s',
-            self._bind_host or '0.0.0.0',
+            'GStreamer RTSP server ready on rtsp://%s:%s%s (bind=%s)',
+            url_host,
             self._bind_port,
             self._mount_path,
+            self._bind_host or '0.0.0.0',
         )
         return True
 
@@ -227,7 +252,6 @@ class GStreamerRtspOutput(RtspOutput):
             appsrc = self._appsrc
             self._appsrc = None
             self._frame_count = 0
-            self._start_time_ns = None
             self._ready.clear()
 
         if appsrc is not None and Gst is not None:
@@ -263,10 +287,7 @@ class GStreamerRtspOutput(RtspOutput):
         buffer.fill(0, data)
 
         duration = Gst.util_uint64_scale_int(1, Gst.SECOND, max(1, self._config.fps))
-        now_ns = time.monotonic_ns()
-        if self._start_time_ns is None:
-            self._start_time_ns = now_ns
-        pts = now_ns - self._start_time_ns
+        pts = self._frame_count * duration
         buffer.pts = pts
         buffer.dts = pts
         buffer.duration = duration
@@ -274,7 +295,16 @@ class GStreamerRtspOutput(RtspOutput):
 
         ret = appsrc.emit('push-buffer', buffer)
         if ret != Gst.FlowReturn.OK:
-            logger.warning('GStreamer push-buffer failed: %s', ret)
+            if ret == Gst.FlowReturn.FLUSHING:
+                self._ready.clear()
+            self._warn_push_failed(ret)
+
+    def _warn_push_failed(self, ret: Any) -> None:
+        now = time.time()
+        if now - self._last_push_warning_at < 5.0:
+            return
+        self._last_push_warning_at = now
+        logger.warning('GStreamer push-buffer failed: %s', ret)
 
     def _run_loop(self) -> None:
         if self._loop is None:
@@ -305,6 +335,7 @@ class GStreamerRtspOutput(RtspOutput):
         with self._lock:
             self._appsrc = appsrc
             self._frame_count = 0
+            self._last_push_warning_at = 0.0
             self._ready.set()
 
 
@@ -327,11 +358,19 @@ def create_rtsp_output(config: RtspOutputConfig) -> RtspOutput:
 def _parse_rtsp_url(url: str) -> tuple[str, int, str]:
     parsed = urlparse(url)
     host = parsed.hostname or '0.0.0.0'
-    port = parsed.port or 8554
+    port = parsed.port or 8555
     path = parsed.path or '/yolo'
     if not path.startswith('/'):
         path = '/' + path
     return host, port, path
+
+
+def _resolve_server_bind_host(host: str) -> str:
+    """Resolve RTSP server bind address from the advertised output host."""
+    normalized = (host or '').strip().lower()
+    if normalized in {'127.0.0.1', 'localhost', '::1'}:
+        return host
+    return '0.0.0.0'
 
 
 def _build_caps(config: RtspOutputConfig) -> str:
@@ -347,6 +386,7 @@ def _build_gst_launch(config: RtspOutputConfig) -> str:
     encoder = _resolve_gst_encoder(config)
     encoder_props = _build_encoder_props(config, encoder, keyint)
     encoder_launch = encoder if not encoder_props else f'{encoder} {encoder_props}'
+    encoder_format = _resolve_encoder_input_format(encoder)
 
     parts = [
         f'appsrc name=source is-live=true format=time caps={caps}',
@@ -356,7 +396,7 @@ def _build_gst_launch(config: RtspOutputConfig) -> str:
     parts.extend(
         [
             'videoconvert',
-            'video/x-raw,format=I420',
+            f'video/x-raw,format={encoder_format}',
             encoder_launch,
             'rtph264pay name=pay0 pt=96 config-interval=1',
         ]
@@ -379,8 +419,15 @@ def _resolve_gst_encoder(config: RtspOutputConfig) -> str:
 
 def _build_encoder_props(config: RtspOutputConfig, encoder: str, keyint: int) -> str:
     props = (config.encoder_props or '').strip()
-    if props:
+    requested_encoder = (config.encoder or 'x264enc').strip() or 'x264enc'
+    if props and requested_encoder == encoder:
         return props
+    if props and requested_encoder != encoder:
+        logger.warning(
+            'Discarding YOLO_GST_ENCODER_PROPS for %s after fallback to %s',
+            requested_encoder,
+            encoder,
+        )
     if encoder != 'x264enc':
         return ''
     extra = 'rc-lookahead=0 sync-lookahead=0' if config.low_latency else ''
@@ -393,3 +440,9 @@ def _build_encoder_props(config: RtspOutputConfig, encoder: str, keyint: int) ->
     if extra:
         pieces.append(extra)
     return ' '.join(pieces)
+
+
+def _resolve_encoder_input_format(encoder: str) -> str:
+    if (encoder or '').strip().lower() == 'nvh264enc':
+        return 'NV12'
+    return 'I420'

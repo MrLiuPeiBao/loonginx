@@ -1,10 +1,16 @@
 import logging
 import threading
 import time
-from typing import List, Optional
+from contextlib import contextmanager
+from typing import Callable, List, Optional
 
 import minimalmodbus
 import serial
+
+try:
+    from serial.rs485 import RS485Settings
+except Exception:  # pragma: no cover - depends on pyserial build/platform
+    RS485Settings = None
 
 
 class SerialManager:
@@ -18,6 +24,13 @@ class SerialManager:
         direct_retries: int = 3,
         direct_response_delay: float = 0.02,
         direct_timeout: Optional[float] = None,
+        lock_timeout: float = 8.0,
+        rs485_enabled: bool = False,
+        rs485_rts_level_for_tx: bool = True,
+        rs485_rts_level_for_rx: bool = False,
+        rs485_loopback: bool = False,
+        rs485_delay_before_tx: float = 0.0,
+        rs485_delay_before_rx: float = 0.0,
     ):
         self.port = port
         self.baudrate = baudrate
@@ -25,8 +38,45 @@ class SerialManager:
         self.direct_retries = direct_retries
         self.direct_response_delay = direct_response_delay
         self.direct_timeout = direct_timeout
+        self.lock_timeout = max(0.1, float(lock_timeout or 8.0))
+        self.rs485_enabled = bool(rs485_enabled)
+        self.rs485_rts_level_for_tx = bool(rs485_rts_level_for_tx)
+        self.rs485_rts_level_for_rx = bool(rs485_rts_level_for_rx)
+        self.rs485_loopback = bool(rs485_loopback)
+        self.rs485_delay_before_tx = float(rs485_delay_before_tx or 0.0)
+        self.rs485_delay_before_rx = float(rs485_delay_before_rx or 0.0)
         self._instruments: dict[int, minimalmodbus.Instrument] = {}
         self._lock = threading.RLock()
+        self._rs485_log_done = False
+        self._transaction_observer: Optional[Callable[..., None]] = None
+
+    def set_transaction_observer(self, callback: Optional[Callable[..., None]]) -> None:
+        self._transaction_observer = callback
+
+    def _record_transaction(self, **payload) -> None:
+        if self._transaction_observer is None:
+            return
+        try:
+            self._transaction_observer(**payload)
+        except Exception as exc:
+            logging.debug("Transaction observer failed error=%s payload=%s", exc, payload)
+
+    @contextmanager
+    def _serial_lock(self, operation: str):
+        acquired = self._lock.acquire(timeout=self.lock_timeout)
+        if not acquired:
+            logging.error(
+                "Serial lock timeout operation=%s port=%s timeout=%.2fs",
+                operation,
+                self.port,
+                self.lock_timeout,
+            )
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            self._lock.release()
 
     def _get_or_create_instrument(self, address: int) -> minimalmodbus.Instrument:
         instrument = self._instruments.get(address)
@@ -40,6 +90,7 @@ class SerialManager:
             serial_port.timeout = self.timeout
             serial_port.write_timeout = self.timeout
             serial_port.inter_byte_timeout = min(self.timeout / 2, 0.05)
+            self._apply_rs485_mode(serial_port)
             if serial_port.is_open:
                 serial_port.close()
             instrument.close_port_after_each_call = True
@@ -48,8 +99,41 @@ class SerialManager:
             logging.info("Created Modbus instrument address=%s", address)
         return instrument
 
+    def _apply_rs485_mode(self, serial_port: serial.Serial) -> None:
+        if not self.rs485_enabled:
+            return
+
+        if RS485Settings is None:
+            logging.error("RS485 mode requested but pyserial RS485Settings is unavailable")
+            return
+
+        try:
+            serial_port.rs485_mode = RS485Settings(
+                rts_level_for_tx=self.rs485_rts_level_for_tx,
+                rts_level_for_rx=self.rs485_rts_level_for_rx,
+                loopback=self.rs485_loopback,
+                delay_before_tx=self.rs485_delay_before_tx,
+                delay_before_rx=self.rs485_delay_before_rx,
+            )
+            if not self._rs485_log_done:
+                logging.info(
+                    "RS485 mode enabled port=%s tx_rts=%s rx_rts=%s loopback=%s "
+                    "delay_tx=%s delay_rx=%s",
+                    self.port,
+                    self.rs485_rts_level_for_tx,
+                    self.rs485_rts_level_for_rx,
+                    self.rs485_loopback,
+                    self.rs485_delay_before_tx,
+                    self.rs485_delay_before_rx,
+                )
+                self._rs485_log_done = True
+        except Exception as exc:
+            logging.error("Failed to apply RS485 mode port=%s error=%s", self.port, exc)
+
     def get_instrument(self, address: int) -> minimalmodbus.Instrument:
-        with self._lock:
+        with self._serial_lock("get_instrument") as acquired:
+            if not acquired:
+                raise TimeoutError(f"serial lock timeout port={self.port}")
             return self._get_or_create_instrument(address)
 
     def read_registers(
@@ -60,7 +144,9 @@ class SerialManager:
         *,
         function_code: int = 3,
     ) -> Optional[List[int]]:
-        with self._lock:
+        with self._serial_lock("read_registers") as acquired:
+            if not acquired:
+                return None
             try:
                 instrument = self._get_or_create_instrument(address)
                 data = instrument.read_registers(register, count, functioncode=function_code)
@@ -104,8 +190,31 @@ class SerialManager:
             response_delay = self.direct_response_delay
         timeout = timeout or self.direct_timeout or self.timeout
         request = self._build_read_request(address, register, count, function_code)
+        observed_retries = max(1, int(retries or 1))
+        started_at = time.monotonic()
+        final_status = "timeout"
+        first_attempt_status: Optional[str] = None
+        attempt_statuses: List[str] = []
+        ok_attempt: Optional[int] = None
 
-        with self._lock:
+        with self._serial_lock("read_registers_direct") as acquired:
+            if not acquired:
+                self._record_transaction(
+                    operation="direct_read",
+                    address=address,
+                    function_code=function_code,
+                    register=register,
+                    count=count,
+                    request_length=len(request),
+                    expected_length=3 + (count * 2) + 2,
+                    retries=observed_retries,
+                    attempts=0,
+                    first_attempt_status="lock_timeout",
+                    ok_attempt=None,
+                    duration_ms=0.0,
+                    status="lock_timeout",
+                )
+                return None
             for attempt in range(1, retries + 1):
                 frame = self._perform_direct_request(
                     address,
@@ -115,6 +224,9 @@ class SerialManager:
                     timeout,
                 )
                 if not frame:
+                    if first_attempt_status is None:
+                        first_attempt_status = "timeout"
+                    attempt_statuses.append("timeout")
                     logging.warning(
                         "Direct read attempt %s/%s failed address=%s register=%s",
                         attempt,
@@ -126,6 +238,35 @@ class SerialManager:
 
                 registers = self._extract_registers_from_frame(frame, count)
                 if registers is not None:
+                    final_status = "ok"
+                    ok_attempt = attempt
+                    if first_attempt_status is None:
+                        first_attempt_status = "ok"
+                    attempt_statuses.append("ok")
+                    self._record_transaction(
+                        operation="direct_read",
+                        address=address,
+                        function_code=function_code,
+                        register=register,
+                        count=count,
+                        request_length=len(request),
+                        expected_length=3 + (count * 2) + 2,
+                        retries=observed_retries,
+                        attempts=attempt,
+                        first_attempt_status=first_attempt_status,
+                        ok_attempt=ok_attempt,
+                        attempt_statuses=tuple(attempt_statuses),
+                        duration_ms=(time.monotonic() - started_at) * 1000.0,
+                        status=final_status,
+                    )
+                    if ok_attempt and ok_attempt > 1:
+                        logging.info(
+                            "Direct Modbus read recovered address=%s register=%s ok_attempt=%s/%s",
+                            address,
+                            register,
+                            ok_attempt,
+                            observed_retries,
+                        )
                     logging.debug(
                         "Direct read ok address=%s register=%s data=%s",
                         address,
@@ -133,6 +274,9 @@ class SerialManager:
                         registers,
                     )
                     return registers
+                if first_attempt_status is None:
+                    first_attempt_status = "parse_error"
+                attempt_statuses.append("parse_error")
 
             logging.error(
                 "Direct Modbus read failed after %s attempts address=%s register=%s",
@@ -140,9 +284,34 @@ class SerialManager:
                 address,
                 register,
             )
+            self._record_transaction(
+                operation="direct_read",
+                address=address,
+                function_code=function_code,
+                register=register,
+                count=count,
+                request_length=len(request),
+                expected_length=3 + (count * 2) + 2,
+                retries=observed_retries,
+                attempts=observed_retries,
+                first_attempt_status=first_attempt_status or final_status,
+                ok_attempt=ok_attempt,
+                attempt_statuses=tuple(attempt_statuses),
+                duration_ms=(time.monotonic() - started_at) * 1000.0,
+                status=final_status,
+            )
             return None
 
     def send_raw_command(self, command: bytes) -> Optional[bytes]:
+        return self.send_raw_command_with_options(command)
+
+    def send_raw_command_with_options(
+        self,
+        command: bytes,
+        *,
+        wait_for_tx_complete: bool = True,
+        response_timeout: Optional[float] = None,
+    ) -> Optional[bytes]:
         if not command:
             logging.error("Empty command payload")
             return None
@@ -157,20 +326,42 @@ class SerialManager:
             command = bytes(command)
 
         device_address = command[0]
+        started_at = time.monotonic()
+        expected_length = self._estimate_response_length(command)
 
-        with self._lock:
+        with self._serial_lock("send_raw_command") as acquired:
+            if not acquired:
+                self._record_transaction(
+                    operation="raw_command",
+                    address=device_address,
+                    function_code=command[1] if len(command) > 1 else None,
+                    register=None,
+                    count=None,
+                    request_length=len(command),
+                    expected_length=expected_length,
+                    retries=1,
+                    duration_ms=0.0,
+                    status="lock_timeout",
+                )
+                return None
+            original_timeout = None
+            serial_port = None
             try:
                 instrument = self._get_or_create_instrument(device_address)
                 serial_port = instrument.serial
                 if not serial_port.is_open:
                     serial_port.open()
+                self._apply_rs485_mode(serial_port)
+                original_timeout = serial_port.timeout
+                if response_timeout is not None:
+                    serial_port.timeout = max(float(response_timeout), 0.01)
 
                 serial_port.reset_input_buffer()
                 serial_port.reset_output_buffer()
                 serial_port.write(command)
-                serial_port.flush()
+                if wait_for_tx_complete:
+                    self._wait_for_tx_complete(serial_port, len(command))
 
-                expected_length = self._estimate_response_length(command)
                 response = serial_port.read(expected_length)
 
                 if expected_length and len(response) < expected_length:
@@ -180,6 +371,18 @@ class SerialManager:
 
                 if not response:
                     logging.error("No response from device address=%s", device_address)
+                    self._record_transaction(
+                        operation="raw_command",
+                        address=device_address,
+                        function_code=command[1] if len(command) > 1 else None,
+                        register=None,
+                        count=None,
+                        request_length=len(command),
+                        expected_length=expected_length,
+                        retries=1,
+                        duration_ms=(time.monotonic() - started_at) * 1000.0,
+                        status="timeout",
+                    )
                     return None
 
                 if not self._validate_crc(response):
@@ -188,8 +391,32 @@ class SerialManager:
                         device_address,
                         response.hex(" "),
                     )
+                    self._record_transaction(
+                        operation="raw_command",
+                        address=device_address,
+                        function_code=command[1] if len(command) > 1 else None,
+                        register=None,
+                        count=None,
+                        request_length=len(command),
+                        expected_length=expected_length,
+                        retries=1,
+                        duration_ms=(time.monotonic() - started_at) * 1000.0,
+                        status="crc_error",
+                    )
                     return None
 
+                self._record_transaction(
+                    operation="raw_command",
+                    address=device_address,
+                    function_code=command[1] if len(command) > 1 else None,
+                    register=None,
+                    count=None,
+                    request_length=len(command),
+                    expected_length=expected_length,
+                    retries=1,
+                    duration_ms=(time.monotonic() - started_at) * 1000.0,
+                    status="ok",
+                )
                 logging.debug(
                     "Command sent address=%s command=%s response=%s",
                     device_address,
@@ -199,7 +426,32 @@ class SerialManager:
                 return bytes(response)
             except Exception as exc:
                 logging.error("Raw command failed address=%s error=%s", device_address, exc)
+                self._record_transaction(
+                    operation="raw_command",
+                    address=device_address,
+                    function_code=command[1] if len(command) > 1 else None,
+                    register=None,
+                    count=None,
+                    request_length=len(command),
+                    expected_length=expected_length,
+                    retries=1,
+                    duration_ms=(time.monotonic() - started_at) * 1000.0,
+                    status="exception",
+                )
                 return None
+            finally:
+                if serial_port is not None and original_timeout is not None:
+                    try:
+                        serial_port.timeout = original_timeout
+                    except Exception:
+                        pass
+                if serial_port is not None:
+                    try:
+                        if serial_port.is_open:
+                            serial_port.close()
+                    except Exception:
+                        pass
+
     def _perform_direct_request(
         self,
         address: int,
@@ -216,10 +468,11 @@ class SerialManager:
                 serial_port.close()
             serial_port.timeout = max(timeout, self.timeout)
             serial_port.open()
+            self._apply_rs485_mode(serial_port)
             serial_port.reset_input_buffer()
             serial_port.reset_output_buffer()
             serial_port.write(request)
-            serial_port.flush()
+            self._wait_for_tx_complete(serial_port, len(request))
             if response_delay > 0:
                 time.sleep(response_delay)
             frame = self._read_register_response(serial_port, address, function_code, timeout)
@@ -385,8 +638,52 @@ class SerialManager:
 
         return 8
 
+    def _wait_for_tx_complete(self, serial_port: serial.Serial, payload_length: int) -> None:
+        estimated = self._estimate_tx_airtime_seconds(serial_port, payload_length)
+        deadline = time.monotonic() + min(max(estimated + 0.05, 0.05), 0.5)
+
+        if estimated > 0:
+            time.sleep(min(estimated, 0.1))
+
+        while time.monotonic() < deadline:
+            try:
+                out_waiting = int(getattr(serial_port, "out_waiting", 0) or 0)
+            except Exception:
+                out_waiting = 0
+            if out_waiting <= 0:
+                return
+            time.sleep(0.005)
+
+        logging.warning(
+            "TX drain wait timed out port=%s payload_length=%s baudrate=%s",
+            self.port,
+            payload_length,
+            self.baudrate,
+        )
+
+    @staticmethod
+    def _estimate_tx_airtime_seconds(serial_port: serial.Serial, payload_length: int) -> float:
+        if payload_length <= 0:
+            return 0.0
+        try:
+            baudrate = float(getattr(serial_port, "baudrate", 0) or 0)
+            if baudrate <= 0:
+                return 0.0
+            bytesize = int(getattr(serial_port, "bytesize", 8) or 8)
+            parity = str(getattr(serial_port, "parity", "N") or "N").upper()
+            stopbits = float(getattr(serial_port, "stopbits", 1) or 1)
+        except Exception:
+            return 0.0
+
+        parity_bits = 0 if parity in {"N", "NONE"} else 1
+        bits_per_char = 1.0 + max(bytesize, 5) + parity_bits + max(stopbits, 1.0)
+        return (payload_length * bits_per_char) / baudrate
+
     def close_all(self) -> None:
-        with self._lock:
+        with self._serial_lock("close_all") as acquired:
+            if not acquired:
+                logging.error("Skip closing serial instruments because lock is stuck port=%s", self.port)
+                return
             for address, instrument in self._instruments.items():
                 try:
                     serial_port = instrument.serial

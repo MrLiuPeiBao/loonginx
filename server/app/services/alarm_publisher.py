@@ -17,6 +17,7 @@ Schema v1（示例）::
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import datetime
@@ -99,3 +100,19 @@ def publish_alarm_event(
     else:
         logger.warning('Alarm event publish failed to %s source=%s', topic, event.get('source'))
     return ok
+
+
+async def publish_alarm_event_async(
+    mqtt_manager: Optional["MQTTManager"],
+    event: Dict[str, Any],
+    *,
+    qos: int = 1,
+    retain: bool = False,
+) -> bool:
+    return await asyncio.to_thread(
+        publish_alarm_event,
+        mqtt_manager,
+        event,
+        qos=qos,
+        retain=retain,
+    )

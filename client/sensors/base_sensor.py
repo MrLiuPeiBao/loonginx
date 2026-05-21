@@ -13,6 +13,8 @@ class BaseSensor(ABC):
         self.address = address
         self.serial_manager = serial_manager
         self.last_value: Any = None
+        self._last_success_ts: Optional[float] = None
+        self._last_payload: Optional[dict] = None
 
     @abstractmethod
     def read_data(self) -> Optional[Any]:
@@ -34,13 +36,16 @@ class BaseSensor(ABC):
 
         self.last_value = parsed_data
         timestamp, ts = self._get_timestamp_pair()
-        return {
+        self._last_success_ts = ts
+        payload = {
             'sensor_type': self.name,
             'address': self.address,
             'value': parsed_data,
             'timestamp': timestamp,
             'ts': ts,
         }
+        self._last_payload = dict(payload)
+        return payload
 
     @staticmethod
     def _get_timestamp() -> str:

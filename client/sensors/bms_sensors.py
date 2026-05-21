@@ -14,11 +14,17 @@ class BMSSensor(BaseSensor):
         self.max_retries = config.get('max_retries', 3)
         self.response_delay = config.get('response_delay', 0.02)
         self.response_timeout = config.get('response_timeout', 1.0)
+        self.fast_keys = tuple(config.get('fast_keys') or ())
+        self.slow_keys = tuple(config.get('slow_keys') or ())
+        self._last_data = {}
 
-    def read_all_data(self):
+    def _read_keys(self, keys):
         timestamp, ts = self._get_timestamp_pair()
-        data = {}
-        for key, register_cfg in self.registers.items():
+        data = dict(self._last_data)
+        for key in keys:
+            register_cfg = self.registers.get(key)
+            if not register_cfg:
+                continue
             register_addr = register_cfg['addr']
             register_count = register_cfg.get('registers', 1)
             fc = register_cfg.get('function_code', self.function_code)
@@ -39,7 +45,6 @@ class BMSSensor(BaseSensor):
                 timeout=response_timeout,
             )
             if not raw_data:
-                data[key] = None
                 continue
 
             if register_count == 1:
@@ -62,13 +67,34 @@ class BMSSensor(BaseSensor):
                     parsed_values.append(parsed)
                 data[key] = parsed_values
 
-        return {
+        self._last_data = dict(data)
+        self._last_success_ts = ts
+        payload = {
             'sensor_type': self.name,
             'address': self.address,
             'timestamp': timestamp,
             'ts': ts,
             'data': data,
         }
+        self._last_payload = {
+            'sensor_type': self.name,
+            'address': self.address,
+            'timestamp': timestamp,
+            'ts': ts,
+            'data': dict(data),
+        }
+        return payload
+
+    def read_fast_data(self):
+        keys = self.fast_keys or tuple(self.registers.keys())
+        return self._read_keys(keys)
+
+    def read_slow_data(self):
+        keys = self.slow_keys or tuple(self.registers.keys())
+        return self._read_keys(keys)
+
+    def read_all_data(self):
+        return self._read_keys(tuple(self.registers.keys()))
 
     def read_data(self):
         return self.read_all_data()

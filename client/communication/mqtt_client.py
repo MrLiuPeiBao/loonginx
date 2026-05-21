@@ -20,6 +20,10 @@ class MQTTClient:
         self._loop_started = False
         self._last_connect_attempt = 0.0
         self._reconnect_backoff = 5.0
+        self._connecting = False
+        self._connect_started_at = 0.0
+        self._connect_attempt_timeout = float(config.get('connect_timeout', 12.0) or 12.0)
+        self._connect_lock = threading.Lock()
         self._default_qos = int(config.get('publish_qos', 0) or 0)
         self._offline_enabled = bool(config.get('offline_queue_enabled'))
         self._offline_max_items = int(config.get('offline_queue_max_items', 0) or 0)
@@ -42,12 +46,14 @@ class MQTTClient:
     def _on_connect(self, client, userdata, flags, rc):
         if rc == 0:
             self.connected = True
+            self._connecting = False
             logging.info("MQTT connected")
             for topic in self.message_callbacks:
                 client.subscribe(topic)
             self._drain_offline_queue()
         else:
             self.connected = False
+            self._connecting = False
             logging.error("MQTT connect failed rc=%s", rc)
 
     def _on_message(self, client, userdata, msg):
@@ -64,8 +70,14 @@ class MQTTClient:
     # Public APIs --------------------------------------------------------
     def connect(self):
         """Connect to the broker and start the network loop."""
+        with self._connect_lock:
+            if self._connecting or self.connected:
+                return
+            self._connecting = True
+            self._last_connect_attempt = time.monotonic()
+            self._connect_started_at = self._last_connect_attempt
         try:
-            self.client.connect(
+            self.client.connect_async(
                 self.config['broker'],
                 self.config['port'],
                 self.config.get('keepalive', 60),
@@ -73,8 +85,8 @@ class MQTTClient:
             if not self._loop_started:
                 self.client.loop_start()
                 self._loop_started = True
-            self._last_connect_attempt = time.monotonic()
         except Exception as exc:
+            self._connecting = False
             logging.error("MQTT connect error: %s", exc)
 
     def _format_payload_for_log(self, payload: Any) -> str:
@@ -213,6 +225,7 @@ class MQTTClient:
 
     def disconnect(self):
         """Stop the loop and disconnect."""
+        self._connecting = False
         try:
             if self._loop_started:
                 self.client.loop_stop()
@@ -225,17 +238,21 @@ class MQTTClient:
         if self.connected:
             return
         now = time.monotonic()
+        if self._connecting:
+            if now - self._connect_started_at < self._connect_attempt_timeout:
+                return
+            logging.warning(
+                "MQTT connect attempt timed out broker=%s port=%s timeout=%.2fs",
+                self.config.get('broker'),
+                self.config.get('port'),
+                self._connect_attempt_timeout,
+            )
+            self._connecting = False
         if now - self._last_connect_attempt < self._reconnect_backoff:
             return
         self._last_connect_attempt = now
         logging.info("MQTT attempting reconnect")
-        try:
-            if not self._loop_started:
-                self.client.loop_start()
-                self._loop_started = True
-            self.client.reconnect()
-        except Exception as exc:
-            logging.error("MQTT reconnect failed: %s", exc)
+        self.connect()
 
     # Offline queue ----------------------------------------------------
     def _enqueue_offline(self, topic: str, payload: bytes, qos: int, retain: bool) -> bool:

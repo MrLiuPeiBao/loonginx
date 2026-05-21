@@ -5,11 +5,11 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import time
 from contextlib import contextmanager
 from typing import Iterator, Set
 
-from sqlalchemy import inspect
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy import event, inspect
 from sqlmodel import Session, SQLModel, create_engine
 from sqlalchemy.pool import StaticPool
 
@@ -18,6 +18,46 @@ from app.db.audio_thresholds import AudioThreshold
 
 
 logger = logging.getLogger(__name__)
+_SLOW_SQL_THRESHOLD_SECONDS = max(
+    0.0,
+    float(os.getenv('SLOW_SQL_THRESHOLD_SECONDS', '1.0') or 1.0),
+)
+
+
+def _compact_sql(statement: str, *, limit: int = 400) -> str:
+    text = ' '.join(str(statement or '').split())
+    if len(text) <= limit:
+        return text
+    return f'{text[:limit]}...'
+
+
+def _before_cursor_execute(conn, cursor, statement, parameters, context, executemany) -> None:
+    starts = conn.info.setdefault('_query_start_time', [])
+    starts.append(time.perf_counter())
+
+
+def _after_cursor_execute(conn, cursor, statement, parameters, context, executemany) -> None:
+    starts = conn.info.get('_query_start_time')
+    if not starts:
+        return
+    started_at = starts.pop()
+    elapsed_seconds = time.perf_counter() - started_at
+    if elapsed_seconds < _SLOW_SQL_THRESHOLD_SECONDS:
+        return
+    logger.warning(
+        'Slow SQL elapsed_ms=%.1f rowcount=%s sql=%s',
+        elapsed_seconds * 1000.0,
+        getattr(cursor, 'rowcount', None),
+        _compact_sql(statement),
+    )
+
+
+def _register_sql_observers(target_engine) -> None:
+    if getattr(target_engine, '_slow_sql_listeners_registered', False):
+        return
+    event.listen(target_engine, 'before_cursor_execute', _before_cursor_execute)
+    event.listen(target_engine, 'after_cursor_execute', _after_cursor_execute)
+    setattr(target_engine, '_slow_sql_listeners_registered', True)
 
 def _build_engine():
     if os.getenv('APP_TEST_MODE'):
@@ -37,6 +77,7 @@ def _build_engine():
 
 _engine_lock = threading.Lock()
 engine = _build_engine()
+_register_sql_observers(engine)
 
 
 def rebuild_engine() -> None:
@@ -45,6 +86,7 @@ def rebuild_engine() -> None:
     with _engine_lock:
         old_engine = engine
         engine = _build_engine()
+        _register_sql_observers(engine)
         try:
             old_engine.dispose()
         except Exception:
@@ -72,7 +114,8 @@ def db_ping() -> bool:
         with engine.connect() as connection:
             connection.exec_driver_sql('SELECT 1')
         return True
-    except SQLAlchemyError:
+    except Exception as exc:
+        logger.debug('Database ping failed: %s', exc)
         return False
 
 
@@ -104,6 +147,7 @@ def _ensure_image_table_schema() -> None:
     try:
         inspector = inspect(engine)
         columns: Set[str] = {col['name'] for col in inspector.get_columns('image_data')}
+        column_info = {col['name']: col for col in inspector.get_columns('image_data')}
     except Exception:  # pragma: no cover - 依赖数据库
         logger.exception('Failed to inspect image_data table')
         return
@@ -123,6 +167,17 @@ def _ensure_image_table_schema() -> None:
             logger.info('Added missing image_path column to image_data table')
         except Exception:  # pragma: no cover - 依赖数据库
             logger.exception('Failed to add image_path column to image_data')
+
+    image_column = column_info.get('image_data')
+    if image_column:
+        type_str = str(image_column.get('type') or '').lower()
+        if 'longtext' not in type_str:
+            try:
+                with engine.begin() as connection:
+                    connection.exec_driver_sql("ALTER TABLE image_data MODIFY image_data LONGTEXT NOT NULL")
+                logger.info('Expanded image_data.image_data column to LONGTEXT')
+            except Exception:  # pragma: no cover - 依赖数据库
+                logger.exception('Failed to expand image_data.image_data column to LONGTEXT')
 
 
 def _ensure_audio_table_schema() -> None:

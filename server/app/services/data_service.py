@@ -7,6 +7,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from sqlmodel import Session, select
 from sqlalchemy import delete, func, text
+from sqlalchemy.orm import load_only
 
 from app.db.models import (
     AlarmRecord,
@@ -182,6 +183,22 @@ class DataService:
             statement = statement.where(SensorData.location == location)
         return int(self.session.exec(statement).one() or 0)
 
+    def get_latest_sensor_data(
+        self,
+        *,
+        device_id: Optional[str] = None,
+        location: Optional[str] = None,
+    ) -> Optional[SensorData]:
+        # Use insertion order rather than payload timestamp order so fragmented
+        # sensor messages arriving out of order still inherit from the last
+        # persisted snapshot.
+        statement = select(SensorData).order_by(SensorData.id.desc())
+        if device_id:
+            statement = statement.where(SensorData.device_id == device_id)
+        if location:
+            statement = statement.where(SensorData.location == location)
+        return self.session.exec(statement.limit(1)).first()
+
     # ------------------------------------------------------------------
     # BMS data
     # ------------------------------------------------------------------
@@ -278,7 +295,7 @@ class DataService:
         return row
 
     # ------------------------------------------------------------------
-    # Cableway PLC status
+    # Cableway status
     # ------------------------------------------------------------------
     def create_cableway_status(self, items: Iterable[CablewayStatus]) -> List[CablewayStatus]:
         return self._persist_entities(items)
@@ -322,10 +339,10 @@ class DataService:
         return int(self.session.exec(statement).one() or 0)
 
     def get_latest_cableway_status(self, *, device_id: Optional[str] = None) -> Optional[CablewayStatus]:
-        statement = select(CablewayStatus).order_by(CablewayStatus.timestamp.desc()).limit(1)
+        statement = select(CablewayStatus).order_by(CablewayStatus.timestamp.desc())
         if device_id:
             statement = statement.where(CablewayStatus.device_id == device_id)
-        return self.session.exec(statement).first()
+        return self.session.exec(statement.limit(1)).first()
 
     # ------------------------------------------------------------------
     # Sensor config
@@ -614,8 +631,19 @@ class DataService:
         location: Optional[str] = None,
         limit: Optional[int] = None,
         offset: Optional[int] = None,
+        include_data: bool = True,
     ) -> List[ImageData]:
         statement = select(ImageData).order_by(ImageData.timestamp.desc())
+        if not include_data:
+            statement = statement.options(
+                load_only(
+                    ImageData.id,
+                    ImageData.timestamp,
+                    ImageData.device_id,
+                    ImageData.image_name,
+                    ImageData.location,
+                )
+            )
         if start:
             statement = statement.where(ImageData.timestamp >= start)
         if end:
@@ -629,6 +657,9 @@ class DataService:
         if offset:
             statement = statement.offset(offset)
         return list(self.session.exec(statement))
+
+    def get_image_data(self, image_id: int) -> Optional[ImageData]:
+        return self.session.get(ImageData, image_id)
 
     def count_image_data(
         self,
@@ -669,8 +700,19 @@ class DataService:
         location: Optional[str] = None,
         limit: Optional[int] = None,
         offset: Optional[int] = None,
+        include_data: bool = True,
     ) -> List[AudioData]:
         statement = select(AudioData).order_by(AudioData.timestamp.desc())
+        if not include_data:
+            statement = statement.options(
+                load_only(
+                    AudioData.id,
+                    AudioData.timestamp,
+                    AudioData.device_id,
+                    AudioData.audio_name,
+                    AudioData.location,
+                )
+            )
         if start:
             statement = statement.where(AudioData.timestamp >= start)
         if end:
@@ -684,6 +726,9 @@ class DataService:
         if offset:
             statement = statement.offset(offset)
         return list(self.session.exec(statement))
+
+    def get_audio_data(self, audio_id: int) -> Optional[AudioData]:
+        return self.session.get(AudioData, audio_id)
 
     def count_audio_data(
         self,

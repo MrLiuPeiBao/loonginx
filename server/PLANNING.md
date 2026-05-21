@@ -57,9 +57,6 @@
 - `create_rfid_data()`：写入 RFID 数据。
 - `list_command_logs()`：查询命令日志。
 - `send_command()`：下发串口命令。
-- `list_cableway_status()`：查询 PLC 状态。
-- `get_latest_cableway_status()`：查询最新 PLC 状态。
-- `send_cableway_command()`：下发 PLC 命令。
 - `list_command_requests()`：查询命令请求状态。
 - `get_command_request()`：查询单条命令请求。
 - `list_sensor_configs()`：查询传感器配置。
@@ -101,7 +98,6 @@
 - `MetalAnomaly`：金属异物表。
 - `BMSData`：电池 BMS 数据表。
 - `RFIDData`：RFID 数据表。
-- `CablewayStatus`：索道 PLC 状态表。
 - `CommandDirection`：命令方向枚举。
 - `CommandLog`：命令日志表。
 - `CommandStatus`：命令状态枚举。
@@ -160,23 +156,18 @@
 - `handle_bms_payload()`：处理 BMS 数据入库。
 - `handle_rfid_payload()`：处理 RFID 数据入库。
 
-### 4.13 `server/app/services/cableway_ingestion.py`
 - `_parse_datetime()`：解析时间。
 - `_to_str()`：安全转字符串。
 - `_resolve_device_id()`：补齐 PLC 设备 ID。
 - `_resolve_location()`：补齐位置。
 - `_decode_payload()`：解析 PLC payload。
-- `handle_cableway_status_payload()`：处理 PLC 状态入库。
 
-### 4.14 `server/app/services/cableway_alerts.py`
 - `_to_bool_map()`：将状态值转布尔映射。
 - `_extract_active_keys()`：提取触发的告警键。
 - `_key_to_name()`：键名到中文描述。
 - `_recently_raised()`：去抖判断。
-- `create_cableway_alarm_events()`：生成 PLC 告警事件列表。
 - `extract_status_payload()`：抽取 PLC 状态摘要。
 
-### 4.15 `server/app/services/cableway_specs.py`
 - `validate_control_command_code()`：校验控制指令编码。
 - `validate_param_updates()`：校验参数更新范围。
 - `FloatParamSpec`：浮点参数规格定义。
@@ -193,9 +184,6 @@
 - `DataService.create_rfid_data()`：写入 RFID 数据。
 - `DataService.list_rfid_data()`：查询 RFID 数据。
 - `DataService.get_latest_rfid_card()`：查询最新 RFID 卡号。
-- `DataService.create_cableway_status()`：写入 PLC 状态。
-- `DataService.list_cableway_status()`：查询 PLC 状态。
-- `DataService.get_latest_cableway_status()`：查询最新 PLC 状态。
 - `DataService.list_sensor_configs()`：查询阈值配置。
 - `DataService.upsert_sensor_config()`：新增或更新阈值配置。
 - `DataService.delete_sensor_config()`：删除阈值配置。
@@ -234,9 +222,6 @@
 - `store_audio_bytes()`：音频字节落盘。
 - `load_file_base64()`：从文件读取并编码 Base64。
 
-### 4.19 `server/app/services/plc_logging.py`
-- `_configure_plc_logger()`：配置 PLC 专用日志。
-- `get_plc_logger()`：获取 PLC 日志器。
 
 ### 4.20 `server/app/services/rfid_cache.py`
 - `set_latest_rfid()`：写入最新 RFID。
@@ -370,7 +355,6 @@
 - `MonitoringGUI.__init__()`：构建 GUI 主窗口。
 - `MonitoringGUI._build_ui()`：构建 UI 布局。
 - `MonitoringGUI._create_treeview()`：创建表格控件。
-- `MonitoringGUI._build_cableway_tab()`：构建 PLC 选项卡。
 - `MonitoringGUI._build_commands_tab()`：构建命令选项卡。
 - `MonitoringGUI._build_logs_tab()`：构建日志选项卡。
 - `MonitoringGUI._build_config_tab()`：构建阈值配置选项卡。
@@ -390,7 +374,6 @@
 - `MonitoringGUI._update_command_history()`：更新命令历史。
 - `MonitoringGUI._update_config_tree()`：更新阈值配置表。
 - `MonitoringGUI._update_images_tab()`：更新图像区域。
-- `MonitoringGUI._update_cableway_tab()`：更新 PLC 状态。
 - `MonitoringGUI._on_config_select()`：选择配置项。
 - `MonitoringGUI._on_config_type_change()`：配置类型切换。
 - `MonitoringGUI._apply_config_form()`：表单回填。
@@ -417,15 +400,6 @@
 - `MonitoringGUI._stop_playback_external()`：停止外部播放器。
 - `MonitoringGUI._read_playback_frame()`：读取播放帧。
 - `MonitoringGUI._configure_logging()`：配置 GUI 日志。
-- `MonitoringGUI._on_cableway_param_select()`：PLC 参数选择。
-- `MonitoringGUI._send_cableway_control()`：发送 PLC 控制命令。
-- `MonitoringGUI._send_cableway_estop()`：发送 PLC 急停命令。
-- `MonitoringGUI._send_cableway_param()`：发送 PLC 参数更新。
-- `MonitoringGUI._confirm_cableway_broadcast_if_no_device()`：确认广播行为。
-- `MonitoringGUI._build_cableway_command_body()`：构建 PLC 命令体。
-- `MonitoringGUI._post_cableway_command()`：HTTP 调用 PLC 命令。
-- `MonitoringGUI._on_cableway_selected()`：PLC 记录选择。
-- `MonitoringGUI._set_cableway_detail()`：设置 PLC 详情。
 - `MonitoringGUI.send_command()`：GUI 下发串口命令。
 - `MonitoringGUI._normalize_payload()`：命令 payload 标准化。
 - `MonitoringGUI._clear_command_inputs()`：清理命令输入。
@@ -457,7 +431,6 @@
 - `alarm.py`：`AlarmRecordRead` / `AlarmRecordCreate`（告警结构）。
 - `audio.py`：`AudioDataBase` / `AudioDataCreate` / `AudioDataRead`。
 - `bms.py`：`BMSDataBase` / `BMSDataCreate` / `BMSDataRead`。
-- `cableway.py`：`CablewayStatusRead` / `CablewayCommandRequest`。
 - `command.py`：`CommandLogRead` / `CommandRequest` / `CommandRequestStatusRead`。
 - `config.py`：`SensorConfigBase` / `SensorConfigCreate` / `SensorConfigRead`。
 - `image.py`：`ImageDataBase` / `ImageDataCreate` / `ImageDataRead`。
@@ -469,8 +442,6 @@
 - `conftest.py: session()`：测试会话与临时数据库。
 - `test_data_service.py`：阈值合并与告警逻辑测试。
 - `test_ingestion_parsing.py`：MQTT 解析健壮性测试。
-- `test_cableway_specs.py`：PLC 参数校验测试。
-- `test_cableway_alerts.py`：PLC 告警生成测试。
 - `test_data_retention.py`：数据保留清理测试。
 - `test_ingested_at.py`：更新为基础入库字段测试。
 - `test_indexes.py`：索引存在性测试。

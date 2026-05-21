@@ -12,8 +12,6 @@ MQTT_TOPICS: Dict[str, str] = {
     'command_request': 'sensors/command/request',
     'command_response': 'sensors/command/response',
     'cableway_status': 'cableway/status',
-    'cableway_command_request': 'cableway/command/request',
-    'cableway_command_response': 'cableway/command/response',
     'person_image': 'yolo/person_img',
     'annotated_person_image': 'yolo/annotated_img',
     'config_update': 'config/update',

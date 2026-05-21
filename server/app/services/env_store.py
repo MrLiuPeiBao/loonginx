@@ -1,12 +1,7 @@
-"""Environment file persistence helpers."""
-
 from __future__ import annotations
 
-import re
 from pathlib import Path
-from typing import Dict, List, Tuple
-
-_ENV_KEY_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
+from typing import Dict, List
 
 
 def serialize_env_value(value: object) -> str:
@@ -14,85 +9,54 @@ def serialize_env_value(value: object) -> str:
         return 'true' if value else 'false'
     if value is None:
         return ''
-    if isinstance(value, (list, tuple, set)):
-        return ','.join(str(item).strip() for item in value if str(item).strip())
     return str(value)
 
 
-def _parse_env_line(line: str) -> Tuple[str, str] | None:
-    stripped = line.strip()
-    if not stripped or stripped.startswith('#'):
-        return None
-    if '=' not in stripped:
-        return None
-    key, value = stripped.split('=', 1)
-    key = key.strip()
-    if not _ENV_KEY_RE.match(key):
-        return None
-    return key, value.strip()
-
-
 def load_env_entries(path: Path) -> List[Dict[str, str]]:
-    """Load env entries with optional description comments."""
-    if not path.exists():
-        return []
     entries: List[Dict[str, str]] = []
-    pending_comments: list[str] = []
-    for line in path.read_text(encoding='utf-8').splitlines():
-        stripped = line.strip()
-        if not stripped:
-            pending_comments = []
+    if not path.is_file():
+        return entries
+    pending_comment: list[str] = []
+    for raw_line in path.read_text(encoding='utf-8').splitlines():
+        line = raw_line.strip()
+        if not line:
+            pending_comment = []
             continue
-        if stripped.startswith('#'):
-            comment = stripped.lstrip('#').strip()
-            if comment:
-                pending_comments.append(comment)
+        if line.startswith('#'):
+            pending_comment.append(line.lstrip('#').strip())
             continue
-        parsed = _parse_env_line(line)
-        if not parsed:
-            pending_comments = []
+        if '=' not in raw_line:
             continue
-        key, value = parsed
+        key, value = raw_line.split('=', 1)
         entries.append(
             {
-                'key': key,
-                'value': value,
-                'comment': ' '.join(pending_comments).strip(),
+                'key': key.strip(),
+                'value': value.strip(),
+                'comment': '\n'.join(pending_comment),
             }
         )
-        pending_comments = []
+        pending_comment = []
     return entries
 
 
-def load_env_file(path: Path) -> Dict[str, str]:
-    data: Dict[str, str] = {}
-    for entry in load_env_entries(path):
-        data[entry['key']] = entry['value']
-    return data
-
-
-def update_env_file(path: Path, updates: Dict[str, object]) -> None:
-    lines = []
-    seen = set()
-    if path.exists():
-        lines = path.read_text(encoding='utf-8').splitlines()
-    out_lines = []
-    for line in lines:
-        parsed = _parse_env_line(line)
-        if not parsed:
-            out_lines.append(line)
+def update_env_file(path: Path, changes: Dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    existing = path.read_text(encoding='utf-8').splitlines() if path.is_file() else []
+    seen: set[str] = set()
+    output: list[str] = []
+    for line in existing:
+        if '=' not in line or line.lstrip().startswith('#'):
+            output.append(line)
             continue
-        key, _value = parsed
-        if key in updates:
-            out_lines.append(f"{key}={serialize_env_value(updates[key])}")
-            seen.add(key)
+        key, _value = line.split('=', 1)
+        normalized_key = key.strip()
+        if normalized_key in changes:
+            output.append(f'{normalized_key}={serialize_env_value(changes[normalized_key])}')
+            seen.add(normalized_key)
         else:
-            out_lines.append(line)
-    for key, value in updates.items():
-        if key in seen:
-            continue
-        if not _ENV_KEY_RE.match(key):
-            continue
-        out_lines.append(f"{key}={serialize_env_value(value)}")
-    content = '\n'.join(out_lines).rstrip('\n') + '\n'
-    path.write_text(content, encoding='utf-8')
+            output.append(line)
+    for key, value in changes.items():
+        if key not in seen:
+            output.append(f'{key}={serialize_env_value(value)}')
+    path.write_text('\n'.join(output) + '\n', encoding='utf-8')
+

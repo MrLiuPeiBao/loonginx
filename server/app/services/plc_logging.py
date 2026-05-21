@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import logging
-import sys
 from pathlib import Path
+
 
 _LOGGER_NAME = "plc"
 _CONFIG_FLAG = "_plc_logging_configured"
@@ -16,23 +16,21 @@ def _configure_plc_logger(log_file: Path) -> logging.Logger:
     logger.setLevel(logging.DEBUG)
     logger.propagate = False
 
-    formatter = logging.Formatter(
-        "[PLC] %(asctime)s %(levelname)s %(name)s: %(message)s"
-    )
+    formatter = logging.Formatter("[PLC] %(asctime)s %(levelname)s %(name)s: %(message)s")
 
-    console_handler = logging.StreamHandler(stream=sys.stdout)
-    console_handler.setLevel(logging.DEBUG)
-    console_handler.setFormatter(formatter)
-    logger.addHandler(console_handler)
-
+    log_file.parent.mkdir(parents=True, exist_ok=True)
     try:
-        log_file.parent.mkdir(parents=True, exist_ok=True)
-        file_handler = logging.FileHandler(str(log_file), encoding="utf-8")
-        file_handler.setLevel(logging.DEBUG)
+        file_handler = logging.FileHandler(log_file, encoding="utf-8")
         file_handler.setFormatter(formatter)
+        file_handler.setLevel(logging.DEBUG)
         logger.addHandler(file_handler)
     except OSError as exc:
         logger.warning("Failed to open PLC log file %s: %s", log_file, exc)
+
+    stream_handler = logging.StreamHandler()
+    stream_handler.setFormatter(formatter)
+    stream_handler.setLevel(logging.INFO)
+    logger.addHandler(stream_handler)
 
     setattr(logger, _CONFIG_FLAG, True)
     return logger

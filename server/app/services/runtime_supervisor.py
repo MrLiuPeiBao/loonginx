@@ -9,19 +9,20 @@ This module is responsible for keeping critical background components alive:
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 import subprocess
 import sys
+import shlex
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Dict, Optional
 
-from app.db.session import db_ping, init_db, session_scope
-from app.services.data_service import DataService
+from app.db.session import db_ping, init_db
 from app.db.models import CommandStatus
 from app.core.config import Settings
-from app.mqtt import MQTTManager
+from app.runtime.db_worker import DBWorker
 from app.services.audio_service import AudioMonitorService
 from app.services.yolo_service import YOLOStreamService
 
@@ -38,6 +39,7 @@ class RuntimeStatus:
     services_started: bool
     yolo_process_alive: bool = False
     audio_process_alive: bool = False
+    media_gateway_process_alive: bool = False
     last_db_error: Optional[str] = None
     last_db_init_attempt_at: Optional[float] = None
 
@@ -48,9 +50,12 @@ class RuntimeSupervisor:
     def __init__(
         self,
         *,
-        mqtt_manager: MQTTManager,
+        mqtt_manager,
         yolo_service: YOLOStreamService,
         audio_service: AudioMonitorService,
+        db_worker: Optional[DBWorker] = None,
+        read_db_worker: Optional[DBWorker] = None,
+        write_db_worker: Optional[DBWorker] = None,
         settings: Settings,
         poll_seconds: float = 2.0,
         db_retry_max_seconds: float = 30.0,
@@ -67,6 +72,10 @@ class RuntimeSupervisor:
         self._mqtt = mqtt_manager
         self._yolo = yolo_service
         self._audio = audio_service
+        self._read_db_worker = read_db_worker or db_worker or write_db_worker
+        self._write_db_worker = write_db_worker or db_worker or read_db_worker
+        if self._read_db_worker is None or self._write_db_worker is None:
+            raise ValueError('RuntimeSupervisor requires db workers')
         self._settings = settings
         self._poll_seconds = max(0.5, float(poll_seconds))
         self._db_retry_max_seconds = max(2.0, float(db_retry_max_seconds))
@@ -75,6 +84,8 @@ class RuntimeSupervisor:
         self._last_command_timeout_check = 0.0
         self._yolo_process: Optional[subprocess.Popen] = None
         self._audio_process: Optional[subprocess.Popen] = None
+        self._media_gateway_process: Optional[subprocess.Popen] = None
+        self._plc_rt_process: Optional[subprocess.Popen] = None
         self._retention_thread: Optional[threading.Thread] = None
         self._retention_enabled = bool(
             (settings.data_retention_days or 0) > 0
@@ -145,13 +156,24 @@ class RuntimeSupervisor:
         """Get a thread-safe status snapshot."""
         with self._lock:
             status = self._status
+            read_queue_size = getattr(self._read_db_worker, 'queue_size', None)
+            write_queue_size = getattr(self._write_db_worker, 'queue_size', None)
             return {
                 'db_ok': status.db_ok,
                 'mqtt_ok': status.mqtt_ok,
                 'db_initialized': status.db_initialized,
                 'services_started': status.services_started,
+                'read_db_worker_queue_size': int(read_queue_size() if callable(read_queue_size) else 0),
+                'write_db_worker_queue_size': int(write_queue_size() if callable(write_queue_size) else 0),
+                'db_worker_queue_size': int(write_queue_size() if callable(write_queue_size) else 0),
                 'yolo_process_alive': status.yolo_process_alive,
                 'audio_process_alive': status.audio_process_alive,
+                'media_gateway_process_alive': status.media_gateway_process_alive,
+                'media_gateway_enabled': bool(self._settings.is_media_gateway_enabled()),
+                'media_gateway_type': str(getattr(self._settings, 'media_gateway_type', '') or ''),
+                'media_gateway_exec': str(getattr(self._settings, 'media_gateway_exec', '') or ''),
+                'media_gateway_relay_rtsp': str(getattr(self._settings, 'media_gateway_relay_rtsp', '') or ''),
+                'plc_rt_process_alive': bool(self._plc_rt_process and self._plc_rt_process.poll() is None),
                 'last_db_error': status.last_db_error,
                 'last_db_init_attempt_at': status.last_db_init_attempt_at,
             }
@@ -165,6 +187,8 @@ class RuntimeSupervisor:
     def _run(self) -> None:
         db_backoff = 1.0
         while not self._stop_event.is_set():
+            self._start_media_gateway_service()
+            self._start_plc_rt_service()
             self._ensure_mqtt()
             self._ensure_db_initialized(backoff_seconds=db_backoff)
             self._ensure_command_timeouts()
@@ -181,8 +205,11 @@ class RuntimeSupervisor:
                 self._status.audio_process_alive = bool(
                     self._audio_process and self._audio_process.poll() is None
                 )
+                self._status.media_gateway_process_alive = bool(
+                    self._media_gateway_process and self._media_gateway_process.poll() is None
+                )
 
-            if self._maybe_start_services():
+            if self._ensure_background_services():
                 db_backoff = 1.0
             else:
                 db_backoff = min(self._db_retry_max_seconds, max(1.0, db_backoff * 2.0))
@@ -208,16 +235,16 @@ class RuntimeSupervisor:
                 continue
             try:
                 tables = self._settings.data_retention_tables
-                with session_scope() as session:
-                    service = DataService(session)
-                    service.prune_old_records(
-                        days=int(self._settings.data_retention_days or 0),
-                        tables=tables,
-                    )
-                    service.prune_by_size(
-                        max_gb=float(self._settings.data_retention_max_gb or 0),
-                        tables=tables,
-                    )
+                self._write_db_worker.call_data_service(
+                    'prune_old_records',
+                    days=int(self._settings.data_retention_days or 0),
+                    tables=tables,
+                )
+                self._write_db_worker.call_data_service(
+                    'prune_by_size',
+                    max_gb=float(self._settings.data_retention_max_gb or 0),
+                    tables=tables,
+                )
             except Exception:
                 logger.exception('Retention cleanup failed')
             self._wait(self._retention_interval)
@@ -255,13 +282,11 @@ class RuntimeSupervisor:
             self._status.last_db_error = None
         logger.info('Database initialized successfully')
 
-    def _maybe_start_services(self) -> bool:
-        """Start YOLO/Audio after DB init succeeds (idempotent)."""
+    def _ensure_background_services(self) -> bool:
+        """Start or keep YOLO/Audio alive after DB init succeeds."""
         with self._lock:
             if not self._status.db_initialized:
                 return False
-            if self._status.services_started:
-                return True
 
         try:
             self._start_yolo_service()
@@ -274,8 +299,37 @@ class RuntimeSupervisor:
 
         with self._lock:
             self._status.services_started = True
-        logger.info('Background services started')
+        logger.debug('Background services ensured')
         return True
+
+    def _start_plc_rt_service(self) -> None:
+        if not self._settings.plc_direct_enabled:
+            self._stop_plc_rt_worker()
+            return
+        self._plc_rt_process = self._ensure_worker_process(
+            name='plc-rt',
+            module='app.plc_rt.process',
+            existing=self._plc_rt_process,
+        )
+
+    def _start_media_gateway_service(self) -> None:
+        if not self._settings.is_media_gateway_enabled():
+            self._stop_media_gateway_worker()
+            return
+        mode = (self._settings.media_gateway_run_mode or 'process').lower()
+        if mode != 'process':
+            logger.warning(
+                'MEDIA_GATEWAY_RUN_MODE=%s is unsupported, fallback to process',
+                mode,
+            )
+        self._media_gateway_process = self._ensure_media_gateway_process(
+            existing=self._media_gateway_process,
+        )
+        with self._lock:
+            self._status.media_gateway_process_alive = bool(
+                self._media_gateway_process and self._media_gateway_process.poll() is None
+            )
+        self._stop_conflicting_rtsp_output_bindings()
 
     def _start_yolo_service(self) -> None:
         if not self._settings.yolo_enabled:
@@ -326,6 +380,58 @@ class RuntimeSupervisor:
         with self._lock:
             self._status.audio_process_alive = bool(self._audio_process and self._audio_process.poll() is None)
 
+    def restart_yolo_worker(self, *, reason: str = '') -> None:
+        """Restart YOLO worker process (process mode only)."""
+        mode = (self._settings.yolo_run_mode or 'thread').lower()
+        if mode != 'process':
+            self._stop_yolo_worker()
+            return
+        if not self._settings.yolo_enabled:
+            self._stop_yolo_worker()
+            return
+        logger.info('Restarting yolo-worker (%s)', reason or 'settings updated')
+        self._stop_yolo_worker()
+        self._yolo_process = self._ensure_worker_process(
+            name='yolo-worker',
+            module='app.services.yolo_worker',
+            existing=None,
+        )
+        with self._lock:
+            self._status.yolo_process_alive = bool(self._yolo_process and self._yolo_process.poll() is None)
+
+    def restart_media_gateway_worker(self, *, reason: str = '') -> None:
+        """Restart media gateway worker process."""
+        if not self._settings.is_media_gateway_enabled():
+            self._stop_media_gateway_worker()
+            return
+        logger.info('Restarting media-gateway worker (%s)', reason or 'settings updated')
+        self._stop_media_gateway_worker()
+        self._media_gateway_process = self._ensure_media_gateway_process(existing=None)
+        with self._lock:
+            self._status.media_gateway_process_alive = bool(
+                self._media_gateway_process and self._media_gateway_process.poll() is None
+            )
+
+    def _stop_yolo_worker(self) -> None:
+        proc = self._yolo_process
+        if proc and proc.poll() is None:
+            logger.info('Stopping yolo-worker process')
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+        if proc and proc.poll() is None:
+            try:
+                proc.wait(timeout=3)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+        self._yolo_process = None
+        with self._lock:
+            self._status.yolo_process_alive = False
+
     def _stop_audio_worker(self) -> None:
         proc = self._audio_process
         if proc and proc.poll() is None:
@@ -346,6 +452,26 @@ class RuntimeSupervisor:
         with self._lock:
             self._status.audio_process_alive = False
 
+    def _stop_media_gateway_worker(self) -> None:
+        proc = self._media_gateway_process
+        if proc and proc.poll() is None:
+            logger.info('Stopping media-gateway process')
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+        if proc and proc.poll() is None:
+            try:
+                proc.wait(timeout=3)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+        self._media_gateway_process = None
+        with self._lock:
+            self._status.media_gateway_process_alive = False
+
     def _ensure_worker_process(
         self,
         *,
@@ -355,6 +481,7 @@ class RuntimeSupervisor:
     ) -> Optional[subprocess.Popen]:
         if existing and existing.poll() is None:
             return existing
+        self._stop_stale_worker_processes(module=module)
         python_bin = sys.executable or 'python'
         logger.info('Starting %s process: %s -m %s', name, python_bin, module)
         try:
@@ -364,12 +491,136 @@ class RuntimeSupervisor:
             logger.exception('Failed to start %s process: %s', name, exc)
             return None
 
+    def _build_media_gateway_command(self) -> list[str]:
+        exec_path = str(self._settings.media_gateway_exec or '').strip()
+        if not exec_path:
+            return []
+        args_text = str(self._settings.media_gateway_args or '').strip()
+        try:
+            args = shlex.split(args_text, posix=False) if args_text else []
+        except Exception:
+            logger.warning('Invalid MEDIA_GATEWAY_ARGS, use raw text fallback: %s', args_text)
+            args = [args_text] if args_text else []
+        return [exec_path, *args]
+
+    def _parse_rtsp_port(self, url: str) -> Optional[int]:
+        from urllib.parse import urlparse
+
+        text = str(url or '').strip()
+        if not text:
+            return None
+        try:
+            parsed = urlparse(text)
+        except Exception:
+            return None
+        try:
+            return int(parsed.port or 0) or None
+        except Exception:
+            return None
+
+    def _stop_conflicting_rtsp_output_bindings(self) -> None:
+        gateway_port = self._parse_rtsp_port(getattr(self._settings, 'media_gateway_relay_rtsp', ''))
+        output_port = self._parse_rtsp_port(getattr(self._settings, 'yolo_rtsp_output', ''))
+        if gateway_port is None or output_port is None or gateway_port != output_port:
+            return
+        worker = self._yolo_process
+        if worker and worker.poll() is None:
+            logger.warning(
+                'Detected YOLO RTSP output port conflict with media gateway: %s; restarting yolo-worker',
+                gateway_port,
+            )
+            self.restart_yolo_worker(reason='rtsp port conflict with media gateway')
+
+    def _resolve_media_gateway_cwd(self) -> Path:
+        default_cwd = Path(__file__).resolve().parents[2]
+        workdir_text = str(self._settings.media_gateway_workdir or '').strip()
+        if not workdir_text:
+            return default_cwd
+        try:
+            candidate = Path(workdir_text).expanduser()
+            if not candidate.is_absolute():
+                candidate = (default_cwd / candidate).resolve()
+            if candidate.exists() and candidate.is_dir():
+                return candidate
+        except Exception:
+            pass
+        logger.warning(
+            'MEDIA_GATEWAY_WORKDIR is invalid, fallback to default: %s',
+            workdir_text,
+        )
+        return default_cwd
+
+    def _ensure_media_gateway_process(
+        self,
+        *,
+        existing: Optional[subprocess.Popen],
+    ) -> Optional[subprocess.Popen]:
+        if existing and existing.poll() is None:
+            return existing
+        command = self._build_media_gateway_command()
+        if not command:
+            logger.warning(
+                'MEDIA_GATEWAY_ENABLED=true but MEDIA_GATEWAY_EXEC is empty; skip media gateway start',
+            )
+            return None
+        exec_name = Path(command[0]).name or command[0]
+        self._stop_stale_external_processes(exec_name=exec_name, command_signature=' '.join(command))
+        cwd = self._resolve_media_gateway_cwd()
+        logger.info('Starting media-gateway process: %s (cwd=%s)', ' '.join(command), cwd)
+        try:
+            return subprocess.Popen(command, cwd=cwd)
+        except Exception as exc:
+            logger.exception('Failed to start media-gateway process: %s', exc)
+            return None
+
     def _handle_runtime_changes(self, changed_keys: list[str]) -> None:
+        media_gateway_changed = any(str(key).upper().startswith('MEDIA_GATEWAY_') for key in changed_keys)
+        if any(str(key).upper().startswith('PLC_') for key in changed_keys):
+            self._restart_plc_rt_worker(reason='PLC_* updated')
+        if any(str(key).upper().startswith('YOLO_') for key in changed_keys):
+            self.restart_yolo_worker(reason='YOLO_* updated')
         if any(str(key).upper().startswith('AUDIO_') for key in changed_keys):
             self.restart_audio_worker(reason='AUDIO_* updated')
+        if media_gateway_changed:
+            self.restart_media_gateway_worker(reason='MEDIA_GATEWAY_* updated')
+            # Effective RTSP inputs may change when gateway rewrite toggles.
+            self.restart_yolo_worker(reason='MEDIA_GATEWAY_* updated')
+            self.restart_audio_worker(reason='MEDIA_GATEWAY_* updated')
+
+    def _restart_plc_rt_worker(self, *, reason: str = '') -> None:
+        if not self._settings.plc_direct_enabled:
+            self._stop_plc_rt_worker()
+            return
+        logger.info('Restarting plc-rt worker (%s)', reason or 'settings updated')
+        self._stop_plc_rt_worker()
+        self._plc_rt_process = self._ensure_worker_process(
+            name='plc-rt',
+            module='app.plc_rt.process',
+            existing=None,
+        )
+
+    def _stop_plc_rt_worker(self) -> None:
+        proc = self._plc_rt_process
+        if proc and proc.poll() is None:
+            logger.info('Stopping plc-rt process')
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+        if proc and proc.poll() is None:
+            try:
+                proc.wait(timeout=3)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+        self._plc_rt_process = None
 
     def _stop_worker_processes(self) -> None:
         for proc, name in (
+            (self._media_gateway_process, 'media-gateway'),
+            (self._plc_rt_process, 'plc-rt'),
             (self._yolo_process, 'yolo-worker'),
             (self._audio_process, 'audio-worker'),
         ):
@@ -380,6 +631,8 @@ class RuntimeSupervisor:
                 except Exception:
                     pass
         for proc, name in (
+            (self._media_gateway_process, 'media-gateway'),
+            (self._plc_rt_process, 'plc-rt'),
             (self._yolo_process, 'yolo-worker'),
             (self._audio_process, 'audio-worker'),
         ):
@@ -391,8 +644,139 @@ class RuntimeSupervisor:
                         proc.kill()
                     except Exception:
                         pass
+        self._media_gateway_process = None
+        self._plc_rt_process = None
         self._yolo_process = None
         self._audio_process = None
+
+    def cleanup_before_exec_restart(self) -> None:
+        """Best-effort cleanup before API process replaces itself via os.execv()."""
+        self._stop_event.set()
+        self._stop_worker_processes()
+        self._stop_stale_worker_processes(module='app.services.yolo_worker')
+        self._stop_stale_worker_processes(module='app.services.audio_worker')
+        media_cmd = self._build_media_gateway_command()
+        if media_cmd:
+            exec_name = Path(media_cmd[0]).name or media_cmd[0]
+            self._stop_stale_external_processes(
+                exec_name=exec_name,
+                command_signature=' '.join(media_cmd),
+            )
+
+    def _stop_stale_worker_processes(self, *, module: str) -> None:
+        current_pid = os.getpid()
+        try:
+            candidates = (
+                subprocess.check_output(
+                    [
+                        "powershell",
+                        "-NoProfile",
+                        "-Command",
+                        (
+                            "Get-CimInstance Win32_Process -Filter \"Name = 'python.exe'\" "
+                            f"| Where-Object {{ $_.CommandLine -like '*{module}*' }} "
+                            "| Select-Object ProcessId,ParentProcessId | ConvertTo-Json -Compress"
+                        ),
+                    ],
+                    text=True,
+                    stderr=subprocess.DEVNULL,
+                ).strip()
+            )
+        except Exception:
+            return
+        if not candidates:
+            return
+        try:
+            import json
+
+            rows = json.loads(candidates)
+        except Exception:
+            return
+        if isinstance(rows, dict):
+            rows = [rows]
+        for row in rows or []:
+            try:
+                pid = int(row.get('ProcessId') or 0)
+                parent_pid = int(row.get('ParentProcessId') or 0)
+            except Exception:
+                continue
+            if pid <= 0 or pid == current_pid or parent_pid == current_pid:
+                continue
+            try:
+                logger.warning('Stopping stale worker pid=%s module=%s parent_pid=%s', pid, module, parent_pid)
+                subprocess.run(
+                    ["taskkill", "/PID", str(pid), "/T", "/F"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                )
+            except Exception:
+                logger.debug('Failed to stop stale worker pid=%s', pid, exc_info=True)
+
+    def _stop_stale_external_processes(self, *, exec_name: str, command_signature: str) -> None:
+        current_pid = os.getpid()
+        normalized_name = str(exec_name or '').strip()
+        if not normalized_name:
+            return
+        signature = str(command_signature or '').strip()
+        signature_lower = signature.lower()
+        escaped_name = normalized_name.replace("'", "''")
+        try:
+            candidates = (
+                subprocess.check_output(
+                    [
+                        "powershell",
+                        "-NoProfile",
+                        "-Command",
+                        (
+                            "Get-CimInstance Win32_Process "
+                            f"| Where-Object {{ $_.Name -eq '{escaped_name}' }} "
+                            "| Select-Object ProcessId,ParentProcessId,CommandLine "
+                            "| ConvertTo-Json -Compress"
+                        ),
+                    ],
+                    text=True,
+                    stderr=subprocess.DEVNULL,
+                ).strip()
+            )
+        except Exception:
+            return
+        if not candidates:
+            return
+        try:
+            import json
+
+            rows = json.loads(candidates)
+        except Exception:
+            return
+        if isinstance(rows, dict):
+            rows = [rows]
+        for row in rows or []:
+            try:
+                pid = int(row.get('ProcessId') or 0)
+                parent_pid = int(row.get('ParentProcessId') or 0)
+            except Exception:
+                continue
+            if pid <= 0 or pid == current_pid or parent_pid == current_pid:
+                continue
+            cmdline = str(row.get('CommandLine') or '')
+            if signature_lower and signature_lower not in cmdline.lower():
+                continue
+            try:
+                logger.warning(
+                    'Stopping stale external process pid=%s exec=%s signature=%s',
+                    pid,
+                    normalized_name,
+                    signature,
+                )
+                subprocess.run(
+                    ["taskkill", "/PID", str(pid), "/T", "/F"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                )
+            except Exception:
+                logger.debug('Failed to stop stale external process pid=%s', pid, exc_info=True)
 
     def _ensure_command_timeouts(self) -> None:
         if self._command_timeout_seconds <= 0:
@@ -402,11 +786,12 @@ class RuntimeSupervisor:
             return
         self._last_command_timeout_check = now
         try:
-            with session_scope() as session:
-                service = DataService(session)
-                timed_out = service.mark_command_timeouts(timeout_seconds=self._command_timeout_seconds)
-                if timed_out:
-                    logger.info('Command timeout marked count=%s', timed_out)
+            timed_out = self._write_db_worker.call_data_service(
+                'mark_command_timeouts',
+                timeout_seconds=self._command_timeout_seconds,
+            )
+            if timed_out:
+                logger.info('Command timeout marked count=%s', timed_out)
         except Exception:  # pragma: no cover - DB dependency
             logger.debug('Command timeout check failed', exc_info=True)
 
