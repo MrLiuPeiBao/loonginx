@@ -1,0 +1,283 @@
+# 文件讲解：`server/app/api/routes.py`
+
+## 1. 文件定位
+- **角色**：业务/基础模块
+- **所在层级**：`server/app/api`
+- **是否建议新人优先阅读**：是
+- **模块文档摘要**：REST API routes.
+
+## 2. 对外依赖与协作关系
+- **导入依赖（节选）**：
+  - `from __future__ import annotations`
+  - `base64`
+  - `json`
+  - `logging`
+  - `os`
+  - `sys`
+  - `threading`
+  - `time`
+  - `traceback`
+  - `from dataclasses import asdict`
+  - `from datetime import datetime, timedelta`
+  - `from pathlib import Path`
+  - `from typing import Any, Dict, List, Optional, Union, TYPE_CHECKING, get_args, get_origin`
+  - `from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, status`
+  - `from fastapi.responses import JSONResponse`
+  - `from sqlmodel import Session`
+  - `from app.core.config import Settings, get_settings, is_hot_update_key, merge_runtime_overrides, split_runtime_override_keys`
+  - `from app.core.constants import MQTT_TOPICS`
+  - `from app.db.models import AlarmRecord, AudioData, BMSData, CablewayStatus, CommandDirection, CommandLog, CommandRequestState, CommandStatus, ImageData, MetalAnomaly, RFIDData, SensorConfig as SensorConfigModel, SensorData`
+  - `from app.db.session import db_ping, get_session, rebuild_engine`
+  - ... 共 44 项
+
+## 3. 核心模块与实现原理
+- **关键常量**：`DEFAULT_QUERY_LIMIT, DEFAULT_QUERY_LOOKBACK_HOURS, _BOOL_FALSE_VALUES, _BOOL_TRUE_VALUES, _ENV_PATH, _OPTION_CHOICES, _SECTION_DEFS, _SECTION_ORDER`
+- **函数设计**：
+  - `get_data_service(session: Session = Depends(get_session))`
+    - 功能：Return a DataService instance.
+    - 实现原理：通过输入参数与模块状态计算结果，并组织 I/O、解析或编排逻辑。
+    - 依赖函数：DataService, Depends
+  - `get_audio_service(request: Request)`
+    - 功能：Return audio monitor service from app state if available.
+    - 实现原理：通过输入参数与模块状态计算结果，并组织 I/O、解析或编排逻辑。
+    - 依赖函数：HTTPException, getattr
+  - `_settings_to_env_dict(settings: Settings)`
+    - 实现原理：通过输入参数与模块状态计算结果，并组织 I/O、解析或编排逻辑。
+    - 依赖函数：extra.get, fields.items, getattr, hasattr, isinstance, iter, name.upper, next
+  - `_get_field_env_name(name: str, field: Any)`
+    - 实现原理：通过输入参数与模块状态计算结果，并组织 I/O、解析或编排逻辑。
+    - 依赖函数：extra.get, getattr, hasattr, isinstance, iter, name.upper, next
+  - `_resolve_optional_type(value: Any)`
+    - 实现原理：通过输入参数与模块状态计算结果，并组织 I/O、解析或编排逻辑。
+    - 依赖函数：_resolve_optional_type, get_args, get_origin, type
+  - `_infer_option_type(value: Any)`
+    - 实现原理：通过输入参数与模块状态计算结果，并组织 I/O、解析或编排逻辑。
+    - 依赖函数：_resolve_optional_type, get_origin
+  - `_infer_env_option_type(value: str)`
+    - 实现原理：通过输入参数与模块状态计算结果，并组织 I/O、解析或编排逻辑。
+    - 依赖函数：lower, str, strip
+  - `_coerce_env_default(value: str, opt_type: str)`
+    - 实现原理：通过输入参数与模块状态计算结果，并组织 I/O、解析或编排逻辑。
+    - 依赖函数：lower, str, strip
+  - `_collect_option_meta(settings: Settings, env_entries: List[Dict[str, str]])`
+    - 实现原理：通过输入参数与模块状态计算结果，并组织 I/O、解析或编排逻辑。
+    - 依赖函数：_coerce_env_default, _get_field_env_name, _infer_env_option_type, _infer_option_type, entry.get, fields.items, getattr
+  - `_build_base_env_config(settings: Settings, env_entries: List[Dict[str, str]])`
+    - 实现原理：通过输入参数与模块状态计算结果，并组织 I/O、解析或编排逻辑。
+    - 依赖函数：_coerce_env_default, _infer_env_option_type, _settings_to_env_dict, entry.get
+  - `_parse_bool_value(value: object, *, key: Optional[str] = None)`
+    - 实现原理：通过输入参数与模块状态计算结果，并组织 I/O、解析或编排逻辑。
+    - 依赖函数：HTTPException, isinstance, lower, str, strip
+  - `_parse_list(value: object)`
+    - 实现原理：通过输入参数与模块状态计算结果，并组织 I/O、解析或编排逻辑。
+    - 依赖函数：isinstance, item.strip, str, strip, text.split
+  - `_normalize_payload_value(key: str, value: object, meta: Dict[str, Any])`
+    - 实现原理：通过输入参数与模块状态计算结果，并组织 I/O、解析或编排逻辑。
+    - 依赖函数：HTTPException, _parse_bool_value, _parse_list, float, int, meta.get, serialize_env_value, str
+  - `_normalize_current_value(value: object, meta: Dict[str, Any])`
+    - 实现原理：通过输入参数与模块状态计算结果，并组织 I/O、解析或编排逻辑。
+    - 依赖函数：_parse_list, float, int, lower, meta.get, str, strip
+  - `_resolve_section_key(key: str)`
+    - 实现原理：通过输入参数与模块状态计算结果，并组织 I/O、解析或编排逻辑。
+    - 依赖函数：str, upper, upper.startswith
+  - `_build_runtime_config_sections(settings: Settings, env_entries: List[Dict[str, str]])`
+    - 实现原理：通过输入参数与模块状态计算结果，并组织 I/O、解析或编排逻辑。
+    - 依赖函数：_OPTION_CHOICES.get, _SECTION_DEFS.get, _collect_option_meta, _resolve_section_key, add_option, append, comments.get, entry.get
+  - `_schedule_restart(settings: Settings, delay_seconds: float = 1.0)`
+    - 实现原理：通过输入参数与模块状态计算结果，并组织 I/O、解析或编排逻辑。
+    - 依赖函数：float, max, os.execv, start, str, threading.Thread, time.sleep
+  - `_write_runtime_config_debug(info: Dict[str, Any])`
+    - 实现原理：通过输入参数与模块状态计算结果，并组织 I/O、解析或编排逻辑。
+    - 依赖函数：Path, datetime.now, handle.write, isoformat, json.dumps, log_path.open, log_path.parent.mkdir, payload.update
+  - `_is_probable_wav(data: bytes)`
+    - 功能：Heuristic check for WAV container header.
+    - 实现原理：通过输入参数与模块状态计算结果，并组织 I/O、解析或编排逻辑。
+    - 依赖函数：len
+  - `_audio_db_value_to_base64(value: object, audio_path: Optional[str] = None)`
+    - 功能：Convert DB audio payload (bytes or legacy text) into base64 string for JSON.
+    - 实现原理：通过输入参数与模块状态计算结果，并组织 I/O、解析或编排逻辑。
+    - 依赖函数：_is_probable_wav, base64.b64decode, base64.b64encode, bytes, decode, isinstance, join, load_file_base64
+  - `_image_db_value_to_base64(value: object, image_path: Optional[str] = None)`
+    - 功能：Convert DB image payload (base64 or file path) into base64 string.
+    - 实现原理：通过输入参数与模块状态计算结果，并组织 I/O、解析或编排逻辑。
+    - 依赖函数：base64.b64encode, bytes, decode, isinstance, load_file_base64, str
+  - `_decode_audio_base64(value: str)`
+    - 功能：Decode base64 audio payload sent via API.
+    - 实现原理：通过输入参数与模块状态计算结果，并组织 I/O、解析或编排逻辑。
+    - 依赖函数：HTTPException, base64.b64decode, strip
+  - `_parse_datetime(value: Optional[str], field: str)`
+    - 功能：解析查询参数中的 datetime 字符串。
+    - 实现原理：通过输入参数与模块状态计算结果，并组织 I/O、解析或编排逻辑。
+    - 依赖函数：HTTPException, datetime.fromisoformat, datetime.fromtimestamp, float, str, strip
+  - `_parse_bool(value: Optional[str], field: str)`
+    - 功能：解析布尔查询参数。
+    - 实现原理：通过输入参数与模块状态计算结果，并组织 I/O、解析或编排逻辑。
+    - 依赖函数：HTTPException, lower, value.strip
+  - `_parse_direction(value: Optional[str])`
+    - 功能：解析命令方向参数。
+    - 实现原理：通过输入参数与模块状态计算结果，并组织 I/O、解析或编排逻辑。
+    - 依赖函数：CommandDirection, HTTPException
+  - `_parse_command_status(value: Optional[str])`
+    - 功能：解析命令状态参数。
+    - 实现原理：通过输入参数与模块状态计算结果，并组织 I/O、解析或编排逻辑。
+    - 依赖函数：CommandStatus, HTTPException
+  - `_apply_default_query_window(start_at: Optional[datetime], end_at: Optional[datetime], limit: Optional[int])`
+    - 实现原理：通过输入参数与模块状态计算结果，并组织 I/O、解析或编排逻辑。
+    - 依赖函数：datetime.now, timedelta
+  - `_normalize_command_payload(raw: Union[str, List[int]])`
+    - 功能：将命令载荷统一为十六进制字符串。
+    - 实现原理：通过输入参数与模块状态计算结果，并组织 I/O、解析或编排逻辑。
+    - 依赖函数：HTTPException, cleaned.split, hex_bytes.append, int, isinstance, join, raw.replace
+  - `_hex_to_bytes(hex_string: str)`
+    - 功能：将空格分隔的十六进制字符串转换为字节序列。
+    - 实现原理：通过输入参数与模块状态计算结果，并组织 I/O、解析或编排逻辑。
+    - 依赖函数：bytes, hex_string.split, int
+  - `health(request: Request, settings: Settings = Depends(get_settings))`
+    - 功能：健康检查。
+    - 实现原理：通过输入参数与模块状态计算结果，并组织 I/O、解析或编排逻辑。
+    - 依赖函数：Depends, bool, datetime.now, db_ping, getattr, hasattr, isoformat, logger.debug
+  - `health_live(settings: Settings = Depends(get_settings))`
+    - 功能：Liveness probe: process is running.
+    - 实现原理：通过输入参数与模块状态计算结果，并组织 I/O、解析或编排逻辑。
+    - 依赖函数：Depends, datetime.now, isoformat, router.get
+  - `health_ready(request: Request, settings: Settings = Depends(get_settings))`
+    - 功能：Readiness probe: DB + MQTT must be available.
+    - 实现原理：通过输入参数与模块状态计算结果，并组织 I/O、解析或编排逻辑。
+    - 依赖函数：Depends, JSONResponse, bool, datetime.now, db_ping, getattr, hasattr, isoformat
+  - `list_sensor_data(start: Optional[str] = Query(default=None, description='起始时间，ISO8601'), end: Optional[str] = Query(default=None, description='结束时间，ISO8601'), device_id: Optional[str] = Query(default=None, description='设备编号'), location: Optional[str] = Query(default=None, description='安装位置'), limit: Optional[int] = Query(default=None, ge=1, le=1000, description='返回数量上限'), offset: int = Query(default=0, ge=0, description='分页偏移量'), data_service: DataService = Depends(get_data_service))`
+    - 功能：查询传感器数据。
+    - 实现原理：通过输入参数与模块状态计算结果，并组织 I/O、解析或编排逻辑。
+    - 依赖函数：Depends, Query, SensorDataRead, _apply_default_query_window, _parse_datetime, cached.get, data_service.list_sensor_data, get_latest_sensor
+  - `create_sensor_data(payload: Union[SensorDataCreate, List[SensorDataCreate]], http_request: Request, data_service: DataService = Depends(get_data_service))`
+    - 功能：插入传感器数据。
+    - 实现原理：通过输入参数与模块状态计算结果，并组织 I/O、解析或编排逻辑。
+    - 依赖函数：Depends, SensorData, data_service.consume_alarm_events, data_service.create_sensor_data, data_service.get_latest_rfid_card, getattr, isinstance, item.dict
+  - `latest_sensor_data(limit: int = Query(default=10, ge=1, le=100, description='返回最新的记录数量'), data_service: DataService = Depends(get_data_service))`
+    - 功能：查询最新的传感器数据。
+    - 实现原理：通过输入参数与模块状态计算结果，并组织 I/O、解析或编排逻辑。
+    - 依赖函数：Depends, Query, SensorDataRead, data_service.list_sensor_data, get_latest_sensor, router.get
+  - `list_bms_data(start: Optional[str] = Query(default=None, description='起始时间，ISO8601'), end: Optional[str] = Query(default=None, description='结束时间，ISO8601'), device_id: Optional[str] = Query(default=None, description='设备编号'), limit: Optional[int] = Query(default=None, ge=1, le=1000, description='返回数量上限'), offset: int = Query(default=0, ge=0, description='分页偏移量'), data_service: DataService = Depends(get_data_service))`
+    - 功能：查询 BMS 数据。
+    - 实现原理：通过输入参数与模块状态计算结果，并组织 I/O、解析或编排逻辑。
+    - 依赖函数：BMSDataRead, Depends, Query, _apply_default_query_window, _parse_datetime, cached.get, data_service.list_bms_data, get_latest_bms
+  - `create_bms_data(payload: Union[BMSDataCreate, List[BMSDataCreate]], http_request: Request, data_service: DataService = Depends(get_data_service))`
+    - 功能：插入 BMS 数据。
+    - 实现原理：通过输入参数与模块状态计算结果，并组织 I/O、解析或编排逻辑。
+    - 依赖函数：BMSData, Depends, data_service.create_bms_data, data_service.get_latest_rfid_card, getattr, isinstance, item.dict, max
+  - `list_rfid_data(start: Optional[str] = Query(default=None, description='起始时间，ISO8601'), end: Optional[str] = Query(default=None, description='结束时间，ISO8601'), device_id: Optional[str] = Query(default=None, description='设备编号'), limit: Optional[int] = Query(default=None, ge=1, le=1000, description='返回数量上限'), offset: int = Query(default=0, ge=0, description='分页偏移量'), data_service: DataService = Depends(get_data_service))`
+    - 功能：查询 RFID 数据。
+    - 实现原理：通过输入参数与模块状态计算结果，并组织 I/O、解析或编排逻辑。
+    - 依赖函数：Depends, Query, RFIDDataRead, _apply_default_query_window, _parse_datetime, asdict, data_service.list_rfid_data, get_latest_rfid
+  - `get_latest_rfid_data(device_id: Optional[str] = Query(default=None, description='设备编号'), data_service: DataService = Depends(get_data_service))`
+    - 功能：获取最新 RFID 数据。
+    - 实现原理：通过输入参数与模块状态计算结果，并组织 I/O、解析或编排逻辑。
+    - 依赖函数：Depends, HTTPException, Query, RFIDDataRead, asdict, data_service.list_rfid_data, get_latest_rfid, router.get
+  - `create_rfid_data(payload: Union[RFIDDataCreate, List[RFIDDataCreate]], data_service: DataService = Depends(get_data_service))`
+    - 功能：插入 RFID 数据。
+    - 实现原理：通过输入参数与模块状态计算结果，并组织 I/O、解析或编排逻辑。
+    - 依赖函数：Depends, RFIDData, data_service.create_rfid_data, isinstance, item.dict, max, router.post, set_latest_rfid
+  - `list_command_logs(direction: Optional[str] = Query(default=None, description='命令方向 request/response'), limit: Optional[int] = Query(default=50, ge=1, le=1000, description='返回数量上限'), offset: int = Query(default=0, ge=0, description='分页偏移量'), data_service: DataService = Depends(get_data_service))`
+    - 功能：查询命令日志。
+    - 实现原理：通过输入参数与模块状态计算结果，并组织 I/O、解析或编排逻辑。
+    - 依赖函数：Depends, Query, _parse_direction, data_service.list_command_logs, router.get
+  - `send_command(request: CommandRequest, http_request: Request, data_service: DataService = Depends(get_data_service))`
+    - 功能：发送命令并记录日志。
+    - 实现原理：通过输入参数与模块状态计算结果，并组织 I/O、解析或编排逻辑。
+    - 依赖函数：Depends, _hex_to_bytes, _normalize_command_payload, data_service.add_command_log, data_service.upsert_command_request, datetime.now, getattr, logger.debug
+  - `list_cableway_status(start: Optional[str] = Query(default=None, description='起始时间，ISO8601'), end: Optional[str] = Query(default=None, description='结束时间，ISO8601'), device_id: Optional[str] = Query(default=None, description='网关设备编号'), limit: Optional[int] = Query(default=50, ge=1, le=1000, description='返回数量上限'), offset: int = Query(default=0, ge=0, description='分页偏移量'), data_service: DataService = Depends(get_data_service))`
+    - 功能：查询索道 PLC 状态历史。
+    - 实现原理：通过输入参数与模块状态计算结果，并组织 I/O、解析或编排逻辑。
+    - 依赖函数：CablewayStatusRead, Depends, Query, _parse_datetime, cached.get, data_service.list_cableway_status, get_cached_cableway_status, router.get
+  - `get_latest_cableway_status(device_id: Optional[str] = Query(default=None, description='网关设备编号'), data_service: DataService = Depends(get_data_service))`
+    - 功能：获取最新索道 PLC 状态。
+    - 实现原理：通过输入参数与模块状态计算结果，并组织 I/O、解析或编排逻辑。
+    - 依赖函数：CablewayStatusRead, Depends, HTTPException, Query, cached.get, data_service.get_latest_cableway_status, get_cached_cableway_status, router.get
+  - `send_cableway_command(request: CablewayCommandRequest, http_request: Request, data_service: DataService = Depends(get_data_service))`
+    - 功能：通过 MQTT 转发索道 PLC 指令/参数到网关执行。
+    - 实现原理：通过输入参数与模块状态计算结果，并组织 I/O、解析或编排逻辑。
+    - 依赖函数：Depends, HTTPException, bool, data_service.add_command_log, data_service.upsert_command_request, datetime.now, getattr, isoformat
+  - `list_command_requests(status: Optional[str] = Query(default=None, description='命令状态 sent/ack/failed/timeout'), device_id: Optional[str] = Query(default=None, description='设备编号'), limit: Optional[int] = Query(default=50, ge=1, le=1000, description='返回数量上限'), offset: int = Query(default=0, ge=0, description='分页偏移量'), data_service: DataService = Depends(get_data_service))`
+    - 功能：查询命令请求状态。
+    - 实现原理：通过输入参数与模块状态计算结果，并组织 I/O、解析或编排逻辑。
+    - 依赖函数：Depends, Query, _parse_command_status, data_service.list_command_requests, router.get
+  - `get_command_request(request_id: str, session: Session = Depends(get_session))`
+    - 功能：获取单条命令请求状态。
+    - 实现原理：通过输入参数与模块状态计算结果，并组织 I/O、解析或编排逻辑。
+    - 依赖函数：Depends, HTTPException, router.get, session.get
+  - `get_runtime_config(session: Session = Depends(get_session))`
+    - 功能：返回运行期配置与覆盖结果。
+    - 实现原理：通过输入参数与模块状态计算结果，并组织 I/O、解析或编排逻辑。
+    - 依赖函数：Depends, _build_base_env_config, _collect_option_meta, _normalize_current_value, base.get, get_settings, items, load_env_entries
+  - `update_runtime_config(request: Request, payload: Dict[str, object] = Body(default_factory=dict), session: Session = Depends(get_session))`
+    - 功能：更新运行期覆盖配置。
+    - 实现原理：通过输入参数与模块状态计算结果，并组织 I/O、解析或编排逻辑。
+    - 依赖函数：Body, Depends, HTTPException, _build_base_env_config, _collect_option_meta, _normalize_current_value, _normalize_payload_value, _schedule_restart
+  - `get_runtime_config_options()`
+    - 功能：返回运行期配置项说明。
+    - 实现原理：通过输入参数与模块状态计算结果，并组织 I/O、解析或编排逻辑。
+    - 依赖函数：_build_runtime_config_sections, get_settings, load_env_entries, router.get
+  - `list_sensor_configs(data_service: DataService = Depends(get_data_service))`
+    - 功能：列出传感器配置。
+    - 实现原理：通过输入参数与模块状态计算结果，并组织 I/O、解析或编排逻辑。
+    - 依赖函数：Depends, data_service.list_sensor_configs, router.get
+  - `create_sensor_config(payload: SensorConfigCreate, data_service: DataService = Depends(get_data_service))`
+    - 功能：新增或更新传感器配置。
+    - 实现原理：通过输入参数与模块状态计算结果，并组织 I/O、解析或编排逻辑。
+    - 依赖函数：Depends, SensorConfigModel, data_service.upsert_sensor_config, payload.dict, router.post
+  - `update_sensor_config(sensor_type: str, payload: SensorConfigCreate, data_service: DataService = Depends(get_data_service))`
+    - 功能：更新指定传感器配置。
+    - 实现原理：通过输入参数与模块状态计算结果，并组织 I/O、解析或编排逻辑。
+    - 依赖函数：Depends, HTTPException, SensorConfigModel, data_service.upsert_sensor_config, payload.dict, router.put
+  - `delete_sensor_config(sensor_type: str, data_service: DataService = Depends(get_data_service))`
+    - 功能：删除指定传感器配置。
+    - 实现原理：通过输入参数与模块状态计算结果，并组织 I/O、解析或编排逻辑。
+    - 依赖函数：Depends, HTTPException, data_service.delete_sensor_config, router.delete
+  - `list_alarm_records(start: Optional[str] = Query(default=None, description='起始时间，ISO8601'), end: Optional[str] = Query(default=None, description='结束时间，ISO8601'), handled: Optional[str] = Query(default=None, description='是否已处理'), limit: Optional[int] = Query(default=None, ge=1, le=1000, description='返回数量上限'), offset: int = Query(default=0, ge=0, description='分页偏移量'), data_service: DataService = Depends(get_data_service))`
+    - 功能：查询报警记录。
+    - 实现原理：通过输入参数与模块状态计算结果，并组织 I/O、解析或编排逻辑。
+    - 依赖函数：AlarmRecordRead, Depends, Query, _parse_bool, _parse_datetime, data_service.list_alarm_records, get_latest_alarm, router.get
+  - `create_alarm_record_api(payload: AlarmRecordCreate, http_request: Request, data_service: DataService = Depends(get_data_service))`
+    - 功能：创建报警记录。
+    - 实现原理：通过输入参数与模块状态计算结果，并组织 I/O、解析或编排逻辑。
+    - 依赖函数：AlarmRecord, Depends, bool, build_alarm_event, data_service.create_alarm_record, datetime.now, float, getattr
+  - `list_image_data(start: Optional[str] = Query(default=None, description='起始时间，ISO8601'), end: Optional[str] = Query(default=None, description='结束时间，ISO8601'), device_id: Optional[str] = Query(default=None, description='设备编号'), location: Optional[str] = Query(default=None, description='安装位置'), limit: Optional[int] = Query(default=None, ge=1, le=1000, description='返回数量上限'), offset: int = Query(default=0, ge=0, description='分页偏移量'), data_service: DataService = Depends(get_data_service))`
+    - 功能：查询图像数据。
+    - 实现原理：通过输入参数与模块状态计算结果，并组织 I/O、解析或编排逻辑。
+    - 依赖函数：Depends, ImageDataRead, Query, _image_db_value_to_base64, _parse_datetime, data_service.list_image_data, router.get
+  - `create_image_data(payload: Union[ImageDataCreate, List[ImageDataCreate]], data_service: DataService = Depends(get_data_service))`
+    - 功能：写入图像数据。
+    - 实现原理：通过输入参数与模块状态计算结果，并组织 I/O、解析或编排逻辑。
+    - 依赖函数：Depends, ImageData, data_service.create_image_data, data_service.get_latest_rfid_card, isinstance, item.dict, router.post
+  - `list_audio_data(start: Optional[str] = Query(default=None, description='起始时间，ISO8601'), end: Optional[str] = Query(default=None, description='结束时间，ISO8601'), device_id: Optional[str] = Query(default=None, description='设备编号'), location: Optional[str] = Query(default=None, description='安装位置'), limit: Optional[int] = Query(default=None, ge=1, le=1000, description='返回数量上限'), offset: int = Query(default=0, ge=0, description='分页偏移量'), data_service: DataService = Depends(get_data_service))`
+    - 功能：查询音频数据。
+    - 实现原理：通过输入参数与模块状态计算结果，并组织 I/O、解析或编排逻辑。
+    - 依赖函数：AudioDataRead, Depends, Query, _audio_db_value_to_base64, _parse_datetime, data_service.list_audio_data, router.get
+  - `create_audio_data(payload: Union[AudioDataCreate, List[AudioDataCreate]], data_service: DataService = Depends(get_data_service))`
+    - 功能：写入音频数据。
+    - 实现原理：通过输入参数与模块状态计算结果，并组织 I/O、解析或编排逻辑。
+    - 依赖函数：AudioData, AudioDataRead, Depends, _audio_db_value_to_base64, _decode_audio_base64, data_service.create_audio_data, data_service.get_latest_rfid_card, isinstance
+  - `list_audio_metrics(limit: int = Query(default=100, ge=1, le=500, description='返回近期特征数量'), audio_service: AudioMonitorService = Depends(get_audio_service))`
+    - 功能：返回近期计算的音频特征序列。
+    - 实现原理：通过输入参数与模块状态计算结果，并组织 I/O、解析或编排逻辑。
+    - 依赖函数：Depends, Query, audio_service.get_metrics, router.get
+  - `update_audio_thresholds(request: Request, payload: Dict[str, float], audio_service: AudioMonitorService = Depends(get_audio_service), session: Session = Depends(get_session))`
+    - 功能：更新音频特征阈值并持久化。
+    - 实现原理：通过输入参数与模块状态计算结果，并组织 I/O、解析或编排逻辑。
+    - 依赖函数：AudioThreshold, Depends, audio_service.update_thresholds, float, get_settings, getattr, lower, payload.get
+  - `stream_audio_metrics(audio_service: AudioMonitorService = Depends(get_audio_service))`
+    - 功能：返回最新一帧音频特征（实时窗口）。
+    - 实现原理：通过输入参数与模块状态计算结果，并组织 I/O、解析或编排逻辑。
+    - 依赖函数：Depends, audio_service.get_metrics, router.get
+  - `list_metal_anomaly(start: Optional[str] = Query(default=None, description='起始时间，ISO8601'), end: Optional[str] = Query(default=None, description='结束时间，ISO8601'), device_id: Optional[str] = Query(default=None, description='设备编号'), location: Optional[str] = Query(default=None, description='安装位置'), limit: Optional[int] = Query(default=None, ge=1, le=1000, description='返回数量上限'), offset: int = Query(default=0, ge=0, description='分页偏移量'), data_service: DataService = Depends(get_data_service))`
+    - 功能：查询金属异常记录。
+    - 实现原理：通过输入参数与模块状态计算结果，并组织 I/O、解析或编排逻辑。
+    - 依赖函数：Depends, Query, _parse_datetime, data_service.list_metal_anomaly, router.get
+  - `create_metal_anomaly(payload: Union[MetalAnomalyCreate, List[MetalAnomalyCreate]], data_service: DataService = Depends(get_data_service))`
+    - 功能：写入金属异常记录。
+    - 实现原理：通过输入参数与模块状态计算结果，并组织 I/O、解析或编排逻辑。
+    - 依赖函数：Depends, MetalAnomaly, data_service.create_metal_anomaly, isinstance, item.dict, router.post
+
+## 4. 新人阅读建议（针对本文件）
+- 建议先看公开函数/类，再沿“关键调用链”逐跳进入下层模块。
+- 对 I/O 代码（MQTT、串口、DB）重点关注异常路径与重试策略。
+- 可结合对应测试文件验证你对边界条件的理解。
