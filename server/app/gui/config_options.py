@@ -73,7 +73,7 @@ CONFIG_SECTIONS: Dict[str, Section] = {
             _option("MYSQL_HOST", default="localhost"),
             _option("MYSQL_PORT", "int", 3306),
             _option("MYSQL_USER", default="root"),
-            _option("MYSQL_PASSWORD", default="root"),
+            _option("MYSQL_PASSWORD"),
             _option("MYSQL_DATABASE", default="loognix"),
         ],
     },
@@ -158,4 +158,3 @@ CONFIG_SECTIONS: Dict[str, Section] = {
         ],
     },
 }
-

@@ -89,25 +89,6 @@ class DBWorker:
                 task.done.set()
 
 
-class DataServiceProxy:
-    def __init__(self, worker: DBWorker):
-        self._worker = worker
-
-    def __getattr__(self, name: str):
-        return lambda *args, **kwargs: self._worker.call_data_service(name, *args, **kwargs)
-
-
-class AsyncDataServiceProxy:
-    def __init__(self, worker: DBWorker):
-        self._worker = worker
-
-    def __getattr__(self, name: str):
-        async def _call(*args, **kwargs):
-            return await self._worker.call_data_service_async(name, *args, **kwargs)
-
-        return _call
-
-
 _WRITE_METHOD_PREFIXES = (
     "create_",
     "upsert_",

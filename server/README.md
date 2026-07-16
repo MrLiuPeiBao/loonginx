@@ -8,6 +8,10 @@
 - 依赖：MySQL、MQTT Broker（如 Mosquitto）。
 - 可选：YOLO/音频依赖、FFmpeg/GStreamer。
 
+新电脑完整部署（Server + Web + Nginx + 视频 sidecar）统一参见
+`docs/WINDOWS_SERVER_WEB_DEPLOYMENT.md`。部署脚本位于 `deploy/windows/`，首次启动默认关闭
+媒体 worker，先验证 API、MySQL、MQTT 和 Web，再逐项启用相机、YOLO 与音频。
+
 快速启动（Conda 推荐）：
 ```powershell
 server/scripts/conda_run.ps1 -EnvName "sensor_server" -Mode "stack"

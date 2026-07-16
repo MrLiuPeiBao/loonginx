@@ -529,6 +529,3 @@ class CablewayPLC:
             trace_id=str(self._trace_context.get("trace_id") or ""),
             **merged_fields,
         )
-
-
-from app.services.legacy_cableway_plc_service import CablewayPLCService, LegacyCablewayPLCService  # noqa: E402

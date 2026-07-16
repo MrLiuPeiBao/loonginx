@@ -1,0 +1,22 @@
+{
+  "name": "nodejs-ws",
+  "version": "1.0.0",
+  "main": "index.js",
+  "bin": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "start:auto": "powershell -ExecutionPolicy Bypass -File .\\start.ps1",
+    "build": "pkg index.js --targets node18-win-x64 --output dist/nodejs-ws.exe",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "express": "^5.1.0",
+    "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "pkg": "^5.8.1"
+  }
+}

@@ -1,18 +1,13 @@
 from __future__ import annotations
 
 import json
-import contextlib
-
 from app.mqtt.client import MQTTMessageContext
 from app.services import ingestion
 
 
-def _broken_session_scope():
-    @contextlib.contextmanager
-    def _ctx():
+class _BrokenDBWorker:
+    def call(self, func, *args, **kwargs):
         raise RuntimeError("db down")
-        yield  # pragma: no cover
-    return _ctx()
 
 
 def test_sensor_ingestion_emits_alarm_on_db_error(monkeypatch) -> None:
@@ -22,7 +17,6 @@ def test_sensor_ingestion_emits_alarm_on_db_error(monkeypatch) -> None:
         events.append(event)
         return True
 
-    monkeypatch.setattr(ingestion, "session_scope", _broken_session_scope)
     monkeypatch.setattr(ingestion, "publish_alarm_event", fake_publish)
 
     payload = {
@@ -45,7 +39,7 @@ def test_sensor_ingestion_emits_alarm_on_db_error(monkeypatch) -> None:
         retain=False,
     )
 
-    ingestion.handle_sensor_payload(context, mqtt_manager=object())
+    ingestion.handle_sensor_payload(context, mqtt_manager=object(), db_worker=_BrokenDBWorker())
 
     assert events
     assert events[0].get("source") == "ingestion_failed"
@@ -58,7 +52,6 @@ def test_bms_ingestion_emits_alarm_on_db_error(monkeypatch) -> None:
         events.append(event)
         return True
 
-    monkeypatch.setattr(ingestion, "session_scope", _broken_session_scope)
     monkeypatch.setattr(ingestion, "publish_alarm_event", fake_publish)
 
     payload = {
@@ -74,7 +67,7 @@ def test_bms_ingestion_emits_alarm_on_db_error(monkeypatch) -> None:
         retain=False,
     )
 
-    ingestion.handle_bms_payload(context, mqtt_manager=object())
+    ingestion.handle_bms_payload(context, mqtt_manager=object(), db_worker=_BrokenDBWorker())
 
     assert events
     assert events[0].get("source") == "ingestion_failed"

@@ -20,12 +20,14 @@ function Stop-Tree {
 }
 
 $visited = @{}
-$nginxRoot = 'C:\Users\lpb\Desktop\coil-design-v2.1.1'
+$serverRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+$repositoryRoot = (Resolve-Path (Join-Path $serverRoot '..')).Path
+$nginxRoot = Join-Path $repositoryRoot 'web'
 $nginxExe = Join-Path $nginxRoot 'nginx.exe'
 $nginxPidFile = Join-Path $nginxRoot 'logs\nginx.pid'
-$nodeWsRoot = 'C:\Users\lpb\Desktop\nodejs-ws'
+$nodeWsRoot = Join-Path $repositoryRoot 'websocket'
 
-foreach ($port in @(1883, 8000, 8554, 8888, 8089, 8090)) {
+foreach ($port in @(1883, 1884, 8000, 8554, 8888, 8089, 8090)) {
     Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue |
         Select-Object -ExpandProperty OwningProcess -Unique |
         ForEach-Object { Stop-Tree -ProcessId ([int]$_) -Visited $visited }
@@ -61,7 +63,8 @@ Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyCon
             return $false
         }
         $normalized = $cmd -replace '/', '\'
-        return $normalized -like '*nodejs-ws\index.js*' -or $normalized -like '*nodejs-ws\\index.js*'
+        $normalizedRoot = $nodeWsRoot -replace '/', '\'
+        return $normalized -like "*$normalizedRoot*index.js*"
     } |
     ForEach-Object { Stop-Tree -ProcessId ([int]$_.ProcessId) -Visited $visited }
 

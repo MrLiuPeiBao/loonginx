@@ -6,6 +6,7 @@ import json
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Optional
 
+from app.core.datetime_utils import parse_datetime, to_local_naive
 from app.db.models import CablewayStatus
 from app.mqtt import MQTTManager, MQTTMessageContext
 from app.services.alarm_publisher import build_alarm_event, publish_alarm_event
@@ -21,29 +22,6 @@ if TYPE_CHECKING:
 plc_logger = get_plc_logger(__name__)
 DEFAULT_DEVICE_ID = "gateway"
 DEFAULT_LOCATION = "unknown"
-
-
-def _to_local_naive(value: datetime) -> datetime:
-    if value.tzinfo is None:
-        return value
-    return value.astimezone().replace(tzinfo=None)
-
-
-def _parse_datetime(value: Any) -> datetime:
-    if isinstance(value, datetime):
-        return _to_local_naive(value)
-    if isinstance(value, (int, float)):
-        return datetime.fromtimestamp(float(value))
-    if isinstance(value, str):
-        text = value.strip()
-        if not text:
-            return datetime.now()
-        try:
-            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
-            return _to_local_naive(parsed)
-        except ValueError:
-            return datetime.now()
-    return datetime.now()
 
 
 def _to_str(value: Any, default: str) -> str:
@@ -98,7 +76,7 @@ def handle_cableway_status_payload(
         )
         return
 
-    timestamp = _parse_datetime(message.get("timestamp"))
+    timestamp = parse_datetime(message.get("timestamp"))
     device_id = _resolve_device_id(message, DEFAULT_DEVICE_ID)
     location = _resolve_location(message, DEFAULT_LOCATION)
     plc_host = message.get("plc_host") or message.get("host") or None

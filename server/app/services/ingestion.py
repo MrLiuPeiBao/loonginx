@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
+import threading
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 from app.db.models import BMSData, RFIDData, SensorData
 from app.core.config import get_settings
+from app.core.datetime_utils import parse_datetime, to_local_naive
 from app.mqtt import MQTTManager, MQTTMessageContext
 from app.services.alarm_publisher import build_alarm_event, publish_alarm_event
 from app.services.bms_cache import set_latest_bms
@@ -26,6 +28,9 @@ SENSOR_GROUP_WINDOW_SECONDS = 2.0
 
 if TYPE_CHECKING:
     from app.runtime.db_worker import DBWorker
+
+_sensor_write_buffer: Dict[Tuple[str, str], Dict[str, Any]] = {}
+_buffer_lock = threading.Lock()
 
 
 def _publish_ingestion_failure(
@@ -50,25 +55,6 @@ def _publish_ingestion_failure(
     )
     publish_alarm_event(mqtt_manager, event)
 
-
-def _to_local_naive(value: datetime) -> datetime:
-    if value.tzinfo is None:
-        return value
-    return value.astimezone().replace(tzinfo=None)
-
-
-def _parse_datetime(value: Any) -> datetime:
-    if isinstance(value, datetime):
-        return _to_local_naive(value)
-    if isinstance(value, (int, float)):
-        return datetime.fromtimestamp(float(value))
-    if isinstance(value, str):
-        try:
-            parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
-            return _to_local_naive(parsed)
-        except ValueError:
-            pass
-    return datetime.now()
 
 
 def _to_str(value: Any, default: str = 'unknown') -> str:
@@ -122,7 +108,7 @@ def _build_sensor_record(
     default_device_id: str,
     default_location: str,
 ) -> Optional[SensorData]:
-    timestamp = _parse_datetime(base.get('timestamp'))
+    timestamp = parse_datetime(base.get('timestamp'))
     device_id = _resolve_device_id(base, default_device_id)
     location = _resolve_location(base, default_location)
 
@@ -217,7 +203,7 @@ def _parse_sensor_message(
             sensor_type = item.get('sensor_type') or item.get('sensor') or item.get('type')
             if sensor_type not in SENSOR_VALUE_FIELDS:
                 continue
-            timestamp = _parse_datetime(item.get('timestamp') or now)
+            timestamp = parse_datetime(item.get('timestamp') or now)
             device_id = _resolve_device_id(item, default_device_id)
             location = _resolve_location(item, default_location)
             anchor_key = (device_id, location)
@@ -253,7 +239,7 @@ def _parse_sensor_message(
 def _parse_bms_message(message: Any) -> Optional[BMSData]:
     if not isinstance(message, dict):
         return None
-    timestamp = _parse_datetime(message.get('timestamp'))
+    timestamp = parse_datetime(message.get('timestamp'))
     device_id = _to_str(message.get('device_id') or message.get('gateway_id'))
     location = _to_str(message.get('location'))
 
@@ -302,7 +288,7 @@ def _parse_rfid_message(message: Any) -> Optional[RFIDData]:
     if not card_id and not raw_data:
         return None
 
-    timestamp = _parse_datetime(message.get('timestamp'))
+    timestamp = parse_datetime(message.get('timestamp'))
     device_id = _to_str(message.get('device_id') or message.get('reader_id') or 'rfid')
     location = _to_str(message.get('location'))
     length = len(str(card_id)) if card_id else None
@@ -315,6 +301,171 @@ def _parse_rfid_message(message: Any) -> Optional[RFIDData]:
         length=length,
         location=location,
     )
+
+
+def _make_persist_func(
+    message: Any,
+    default_device: str,
+    default_location: str,
+    settings: Any,
+) -> Any:
+    """Build the _persist closure for db_worker.call()."""
+
+    def _persist(session):
+        service = DataService(session)
+        max_backfill_age_seconds = float(settings.sensor_backfill_max_age_seconds)
+        latest_rfid = service.get_latest_rfid_card()
+        location_override = latest_rfid or default_location
+        records = _parse_sensor_message(
+            message,
+            default_device_id=default_device,
+            default_location=location_override,
+        )
+        if not records:
+            return None, []
+        for record in records:
+            record.device_id = default_device
+            if latest_rfid:
+                record.location = latest_rfid
+            previous = service.get_latest_sensor_data(
+                device_id=record.device_id,
+                location=record.location,
+            )
+            _backfill_sensor_record(
+                record,
+                previous,
+                max_age_seconds=max_backfill_age_seconds,
+            )
+        stored = service.create_sensor_data(records)
+        latest = max(stored, key=lambda item: item.timestamp) if stored else None
+        return latest, service.consume_alarm_events()
+
+    return _persist
+
+
+# ------------------------------------------------------------------ #
+# Buffer-and-merge helpers for WAIT_FOR_ALL_SENSORS mode
+# ------------------------------------------------------------------ #
+
+def _flatten_sensor_map(message: Any) -> Optional[Dict[str, Any]]:
+    """Extract a flat sensor field -> value dict from any message format."""
+    if isinstance(message, dict):
+        return _extract_sensor_map(message)
+    if isinstance(message, list):
+        merged: Dict[str, Any] = {}
+        for item in message:
+            if not isinstance(item, dict):
+                continue
+            sensor_type = item.get('sensor_type') or item.get('sensor') or item.get('type')
+            if sensor_type in SENSOR_VALUE_FIELDS:
+                merged[sensor_type] = item.get('value')
+        return merged if merged else None
+    return None
+
+
+def _is_sensor_complete(sensor_map: Dict[str, Any]) -> bool:
+    """Check if all SENSOR_VALUE_FIELDS have a non-None value."""
+    return all(sensor_map.get(f) is not None for f in SENSOR_VALUE_FIELDS)
+
+
+def _merge_into_buffer(
+    key: Tuple[str, str],
+    sensor_map: Dict[str, Any],
+    base: Dict[str, Any],
+    now: datetime,
+) -> bool:
+    """Merge incoming sensor values into the write buffer.
+
+    Returns True when the buffer entry is complete (all fields present).
+    """
+    entry = _sensor_write_buffer.get(key)
+    if entry is None:
+        entry = {
+            'sensor_map': {},
+            'base': None,
+            'first_seen': now,
+            'last_seen': now,
+        }
+        _sensor_write_buffer[key] = entry
+    for field, value in sensor_map.items():
+        if value is not None:
+            entry['sensor_map'][field] = value
+    entry['last_seen'] = now
+    entry['base'] = base
+    return _is_sensor_complete(entry['sensor_map'])
+
+
+def _flush_buffer_entry(
+    key: Tuple[str, str],
+    db_worker: "DBWorker",
+    settings: Any,
+) -> Tuple[Optional[SensorData], List[Dict[str, Any]]]:
+    """Flush a single buffer entry to the database."""
+    entry = _sensor_write_buffer.pop(key, None)
+    if entry is None:
+        return None, []
+    sensor_map = entry['sensor_map']
+    base = entry['base'] or {}
+
+    if not any(sensor_map.get(f) is not None for f in SENSOR_VALUE_FIELDS):
+        return None, []
+
+    record = _build_sensor_record(
+        base,
+        sensor_map,
+        default_device_id=base.get('device_id', DEFAULT_DEVICE_ID),
+        default_location=base.get('location', DEFAULT_LOCATION),
+    )
+    if record is None:
+        return None, []
+
+    def _persist(session):
+        service = DataService(session)
+        max_backfill_age_seconds = float(settings.sensor_backfill_max_age_seconds)
+        latest_rfid = service.get_latest_rfid_card()
+        if latest_rfid:
+            record.location = latest_rfid
+        previous = service.get_latest_sensor_data(
+            device_id=record.device_id,
+            location=record.location,
+        )
+        _backfill_sensor_record(
+            record,
+            previous,
+            max_age_seconds=max_backfill_age_seconds,
+        )
+        stored = service.create_sensor_data([record])
+        latest = max(stored, key=lambda item: item.timestamp) if stored else None
+        return latest, service.consume_alarm_events()
+
+    latest, events = db_worker.call(_persist)
+    return latest, events
+
+
+def _flush_stale_buffers(
+    db_worker: "DBWorker",
+    settings: Any,
+    now: datetime,
+) -> List[Dict[str, Any]]:
+    """Flush buffer entries that have exceeded the timeout window."""
+    timeout = float(settings.sensor_group_timeout_seconds)
+    stale_events: List[Dict[str, Any]] = []
+    stale_keys = [
+        key
+        for key, entry in list(_sensor_write_buffer.items())
+        if (now - entry['last_seen']).total_seconds() >= timeout
+    ]
+    with _buffer_lock:
+        for key in stale_keys:
+            try:
+                if key not in _sensor_write_buffer:
+                    continue
+                _, events = _flush_buffer_entry(key, db_worker, settings)
+                stale_events.extend(events)
+            except Exception:
+                logger.exception('Failed to flush stale buffer entry %s', key)
+                _sensor_write_buffer.pop(key, None)
+    return stale_events
 
 
 def handle_sensor_payload(
@@ -342,39 +493,63 @@ def handle_sensor_payload(
         default_location = _resolve_location(base_obj, DEFAULT_LOCATION)
 
     events: List[Dict[str, Any]] = []
-    try:
-        def _persist(session):
-            service = DataService(session)
-            max_backfill_age_seconds = float(settings.sensor_backfill_max_age_seconds)
-            latest_rfid = service.get_latest_rfid_card()
-            location_override = latest_rfid or default_location
-            records = _parse_sensor_message(
-                message,
-                default_device_id=default_device,
-                default_location=location_override,
+
+    # ------------------------------------------------------------ #
+    # Buffered path: wait for all sensor fields before writing
+    # ------------------------------------------------------------ #
+    if settings.wait_for_all_sensors:
+        try:
+            sensor_map = _flatten_sensor_map(message)
+            if sensor_map is None:
+                return
+
+            now = datetime.now()
+            key = (default_device, default_location)
+            base = {
+                'device_id': default_device,
+                'location': default_location,
+                'timestamp': now,
+            }
+
+            with _buffer_lock:
+                is_complete = _merge_into_buffer(key, sensor_map, base, now)
+
+            if is_complete:
+                with _buffer_lock:
+                    latest, buf_events = _flush_buffer_entry(key, db_worker, settings)
+                events.extend(buf_events)
+                if latest:
+                    set_latest_sensor(latest)
+
+            # Opportunistically flush stale buffers
+            stale_events = _flush_stale_buffers(db_worker, settings, now)
+            events.extend(stale_events)
+
+        except Exception as exc:
+            logger.exception('Failed to buffer sensor data from MQTT')
+            _publish_ingestion_failure(
+                mqtt_manager=mqtt_manager,
+                context=context,
+                device_id=default_device,
+                location=default_location,
+                payload_type='sensor_data',
+                error=exc,
             )
-            if not records:
-                return None, []
-            for record in records:
-                record.device_id = default_device
-                if latest_rfid:
-                    record.location = latest_rfid
-                previous = service.get_latest_sensor_data(
-                    device_id=record.device_id,
-                    location=record.location,
-                )
-                _backfill_sensor_record(
-                    record,
-                    previous,
-                    max_age_seconds=max_backfill_age_seconds,
-                )
-            stored = service.create_sensor_data(records)
-            latest = max(stored, key=lambda item: item.timestamp) if stored else None
-            return latest, service.consume_alarm_events()
+            return
+
+        for event in events:
+            publish_alarm_event(mqtt_manager, event)
+        return
+
+    # ------------------------------------------------------------ #
+    # Immediate-write path (original behavior, WAIT_FOR_ALL_SENSORS=false)
+    # ------------------------------------------------------------ #
+    try:
+        persist_func = _make_persist_func(message, default_device, default_location, settings)
 
         if db_worker is None:
             raise RuntimeError("db_worker is required for sensor data ingestion")
-        latest, events = db_worker.call(_persist)
+        latest, events = db_worker.call(persist_func)
         if latest:
             set_latest_sensor(latest)
         if latest is None and not events:

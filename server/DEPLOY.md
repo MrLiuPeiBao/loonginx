@@ -1,5 +1,9 @@
 # Server Deployment Guide
 
+> 当前 Server + Web 新电脑部署请优先使用
+> `../docs/WINDOWS_SERVER_WEB_DEPLOYMENT.md` 和 `../deploy/windows/`。本文保留 Server
+> 单组件安装参数说明；不要把本机 `.env`、相机凭据或 TLS 私钥提交到仓库。
+
 This document describes how to install and start the `server` component on a new Windows machine that already has Anaconda installed.
 
 ## Scope

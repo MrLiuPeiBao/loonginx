@@ -21,12 +21,9 @@ def test_validate_control_command_code_rejects_unknown_value() -> None:
         validate_control_command_code(999)
 
 
-def test_validate_param_updates_enforces_ranges() -> None:
-    validated = validate_param_updates({"cs_auto_speed": 0.5})
-    assert validated["cs_auto_speed"] == pytest.approx(0.5)
-
-    with pytest.raises(ValueError):
-        validate_param_updates({"cs_auto_speed": 0.9})
+def test_validate_param_updates_is_not_supported() -> None:
+    with pytest.raises(ValueError, match="no longer supported"):
+        validate_param_updates({"cs_auto_speed": 0.5})
 
 
 def test_cableway_status_persist_and_latest(session) -> None:

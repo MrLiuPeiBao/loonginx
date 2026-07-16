@@ -34,6 +34,19 @@ client/logs/
 .env.*
 server/.env
 client/.env
+!server/.env.example
+!websocket/.env.example
+server/config/local/
+server/tools/go2rtc/go2rtc.yaml
+web/*.key
+web/*.key.org
+web/*.crt
+web/*.csr
+
+# Node runtime dependencies and caches
+node_modules/
+.npm-cache/
+websocket/dist/
 
 # Windows metadata
 *.Zone.Identifier
@@ -54,3 +67,11 @@ board_backup/
 
 # Generated media files
 server/media/
+
+# Bundled web runtime state and debug artifacts
+web/logs/
+web/temp/
+web/.serial_mcp/
+web/html/js/*.map
+web/html/config/local/
+websocket/*.log

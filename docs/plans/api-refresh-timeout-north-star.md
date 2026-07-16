@@ -84,11 +84,11 @@ Unable to open RTSP stream ..., retry in 5.0s
 ```env
 YOLO_ENABLED=true
 YOLO_RUN_MODE=process
-YOLO_RTSP_INPUT=rtsp://admin:HIKKBA12@192.168.0.101:554/Streaming/Channels/101
+YOLO_RTSP_INPUT=rtsp://admin:<password>@192.168.0.101:554/Streaming/Channels/101
 
 AUDIO_ENABLED=true
 AUDIO_RUN_MODE=process
-AUDIO_RTSP_INPUT=rtsp://admin:HIKKBA12@192.168.0.101:554/Streaming/Channels/101
+AUDIO_RTSP_INPUT=rtsp://admin:<password>@192.168.0.101:554/Streaming/Channels/101
 ```
 
 YOLO 与音频已经是独立进程，这是正确方向；但二者仍直接连接同一个摄像头 RTSP。摄像头网络不稳定、RTSP 会话数限制、摄像头 554 端口短时不可达时，两个 worker 会同时进入失败重试。
@@ -130,7 +130,7 @@ Test-NetConnection 192.168.0.101 -Port 554
 再用 ffmpeg 做最小化验证：
 
 ```powershell
-ffmpeg -rtsp_transport tcp -timeout 5000000 -i "rtsp://admin:HIKKBA12@192.168.0.101:554/Streaming/Channels/101" -t 3 -f null -
+ffmpeg -rtsp_transport tcp -timeout 5000000 -i "rtsp://admin:<password>@192.168.0.101:554/Streaming/Channels/101" -t 3 -f null -
 ```
 
 只有这两个验证通过，才应该打开 YOLO 和音频 worker。

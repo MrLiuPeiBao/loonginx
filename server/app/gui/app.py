@@ -1851,8 +1851,13 @@ class MonitoringGUI:
         return alerts
 
     def _handle_bms_alerts(self, alerts: List[Dict[str, Any]]) -> None:
+        # 低压报警弹窗功能已禁用，仅记录日志
         for alert in alerts:
-            self._prompt_bms_charge(alert)
+            device = alert.get('device_id', 'bms')
+            location = alert.get('location', '')
+            min_v = alert.get('min_voltage', 0)
+            logger.info('BMS低压告警（弹窗已禁用）: 设备 %s @ %s, 电压 %.3f V', device, location, min_v)
+            self._append_log(f'BMS低压告警: 设备 {device} @ {location}, 电压 {min_v:.3f} V')
 
     def _prompt_bms_charge(self, alert: Dict[str, Any]) -> None:
         device = alert.get('device_id', 'bms')

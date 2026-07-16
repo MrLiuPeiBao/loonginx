@@ -59,7 +59,7 @@ class Settings(BaseSettings):
     mysql_host: str = Field('localhost', env='MYSQL_HOST')
     mysql_port: int = Field(3306, env='MYSQL_PORT')
     mysql_user: str = Field('root', env='MYSQL_USER')
-    mysql_password: str = Field('root', env='MYSQL_PASSWORD')
+    mysql_password: str = Field('', env='MYSQL_PASSWORD')
     mysql_database: str = Field('loognix', env='MYSQL_DATABASE')
 
     api_host: str = Field('0.0.0.0', env='API_HOST')
@@ -68,6 +68,8 @@ class Settings(BaseSettings):
     prefer_payload_device_id: bool = Field(False, env='PREFER_PAYLOAD_DEVICE_ID')
     command_timeout_seconds: int = Field(15, env='COMMAND_TIMEOUT_SECONDS')
     sensor_backfill_max_age_seconds: float = Field(12.0, env='SENSOR_BACKFILL_MAX_AGE_SECONDS')
+    wait_for_all_sensors: bool = Field(False, env='WAIT_FOR_ALL_SENSORS')
+    sensor_group_timeout_seconds: float = Field(5.0, env='SENSOR_GROUP_TIMEOUT_SECONDS')
     plc_direct_enabled: bool = Field(False, env='PLC_DIRECT_ENABLED')
     plc_host: str = Field('192.168.2.1', env='PLC_HOST')
     plc_port: int = Field(502, env='PLC_PORT')

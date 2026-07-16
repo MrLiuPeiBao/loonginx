@@ -102,6 +102,7 @@ def publish_alarm_event(
     return ok
 
 
+# backwards compat: sync publish_alarm_event is the single implementation
 async def publish_alarm_event_async(
     mqtt_manager: Optional["MQTTManager"],
     event: Dict[str, Any],
@@ -109,10 +110,4 @@ async def publish_alarm_event_async(
     qos: int = 1,
     retain: bool = False,
 ) -> bool:
-    return await asyncio.to_thread(
-        publish_alarm_event,
-        mqtt_manager,
-        event,
-        qos=qos,
-        retain=retain,
-    )
+    return await asyncio.to_thread(publish_alarm_event, mqtt_manager, event, qos=qos, retain=retain)

@@ -58,8 +58,8 @@ def test_parse_sensor_message_groups_by_bucket_and_coerces_values() -> None:
         assert getattr(second, item["sensor_type"]) == pytest.approx(item["value"])
 
 
-def test_parse_sensor_message_discards_incomplete_dict_payload() -> None:
-    """Dict payload missing fields is ignored to avoid partial rows."""
+def test_parse_sensor_message_accepts_incomplete_dict_for_backfill() -> None:
+    """Incomplete snapshots are parsed so the ingestion layer can backfill them."""
     message = {
         "sensors": {
             "temperature": "20.5",
@@ -72,4 +72,7 @@ def test_parse_sensor_message_discards_incomplete_dict_payload() -> None:
 
     records = ingestion._parse_sensor_message(message)
 
-    assert records == []
+    assert len(records) == 1
+    assert records[0].temperature == pytest.approx(20.5)
+    assert records[0].humidity == pytest.approx(30.1)
+    assert records[0].smoke is None

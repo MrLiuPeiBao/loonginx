@@ -50,7 +50,7 @@ def test_refresh_data_task_handles_read_error_without_reraising():
     async def raise_read_error(*args, **kwargs):
         raise httpx.ReadError('server disconnected')
 
-    gui._request_json_async = raise_read_error
+    gui._refresh_data_via_aggregate = raise_read_error
 
     asyncio.run(gui._refresh_data_task())
 

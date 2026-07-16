@@ -25,6 +25,15 @@
 - `server/app/db/*`：SQLModel 模型、会话管理与表结构维护。
 - `server/app/gui/*`：Tkinter GUI。
 
+### 3.3 Web 部署面
+- `web/`：Windows Nginx 与预构建 Vue 静态文件，对外提供 `:8888` 单一入口。
+- `websocket/`：Node + FFmpeg sidecar，仅监听本机视频端口 `:8089/:8090`，并在
+  `:1884` 提供到 Mosquitto `:1883` 的 MQTT WebSocket 代理。
+- Nginx 将 `/api/*`、`/ws/camera1`、`/ws/camera2`、`/mqtt` 分别代理到本机
+  `:8000`、`:8089`、`:8090`、`:1884`，减少对局域网开放的端口。
+- MySQL schema 仍由 Server 的 SQLModel 模型维护；部署脚本只创建配置和环境，不复制生产数据，
+  不改变数据库表结构。
+
 ## 4. 架构与数据流图
 
 ### 4.1 总体架构图

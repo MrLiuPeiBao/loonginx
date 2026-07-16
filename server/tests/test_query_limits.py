@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import os
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -30,13 +31,27 @@ def _build_client(session) -> TestClient:
     os.environ["APP_TEST_MODE"] = "1"
     from app.api.routes import router
     from app.db.session import get_session
+    from app.services.data_service import DataService
 
     app = FastAPI()
 
     def _override_get_session():
         yield session
 
+    async def _call_async(func, *args, **kwargs):
+        return func(session, *args, **kwargs)
+
+    async def _call_data_service_async(name, *args, **kwargs):
+        return getattr(DataService(session), name)(*args, **kwargs)
+
     app.dependency_overrides[get_session] = _override_get_session
+    worker = SimpleNamespace(
+        call_async=_call_async,
+        call_data_service_async=_call_data_service_async,
+    )
+    app.state.read_db_worker = worker
+    app.state.write_db_worker = worker
+    app.state.media_db_worker = worker
     app.include_router(router)
     return TestClient(app)
 

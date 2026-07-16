@@ -222,7 +222,7 @@
 ### IDX-EXTERNAL-NODEJS-WS 外部视频中转服务器 nodejs-ws
 - 外部路径：`C:\Users\lpb\Desktop\nodejs-ws\index.js`。
 - 当前状态：已回退为直连相机 RTSP，不读取 `RTSP_UNIFIED_BASE`、`RTSP_URL_CAMERA1`、`RTSP_URL_CAMERA2`。
-- 当前两路源：`rtsp://admin:HIKKBA12@192.168.0.101:554/h264/ch1/main/av_stream`、`rtsp://admin:HIKKBA12@192.168.0.101:554/h264/ch2/main/av_stream`。
+- 当前两路源：`rtsp://admin:<password>@192.168.0.101:554/h264/ch1/main/av_stream`、`rtsp://admin:<password>@192.168.0.101:554/h264/ch2/main/av_stream`。
 - 注意：`C:\Users\lpb\Desktop\nodejs-ws\start.ps1` 仍可能设置 `RTSP_UNIFIED_BASE=rtsp://127.0.0.1:8554`、`RTSP_URL_CAMERA1=.../cam01`、`RTSP_URL_CAMERA2=.../cam02`，但当前 `index.js` 不使用这些环境变量。
 
 ### IDX-EXTERNAL-CONTROL-PANEL control-panel / 海康 demo.js
@@ -233,8 +233,8 @@
 
 ### IDX-CAMERA-CHANNELS 相机与通道约定
 - 设备：`192.168.0.101`，RTSP 端口 `554`，Web/control 端口 `80`。
-- 第一路常用源：`rtsp://admin:HIKKBA12@192.168.0.101:554/h264/ch1/main/av_stream`。
-- 第二路用户确认源：`rtsp://admin:HIKKBA12@192.168.0.101:554/h264/ch2/main/av_stream`。
+- 第一路常用源：`rtsp://admin:<password>@192.168.0.101:554/h264/ch1/main/av_stream`。
+- 第二路用户确认源：`rtsp://admin:<password>@192.168.0.101:554/h264/ch2/main/av_stream`。
 - 曾讨论映射：统一入口示例为 `rtsp://127.0.0.1:8554/cam01`、`rtsp://127.0.0.1:8554/cam02`。不要把两路都映射到同一个 `cam01`。
 
 ### IDX-SERVER-CHANGE-RULES 后续改动原则

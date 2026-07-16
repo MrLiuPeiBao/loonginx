@@ -32,7 +32,7 @@ def test_cableway_fault_alarm_is_edge_triggered(session) -> None:
 
     alarms = session.exec(select(AlarmRecord)).all()
     assert len(alarms) == 1
-    assert alarms[0].sensor_name == 'GZ总故障'
+    assert alarms[0].sensor_name == 'Total fault'
     assert len(events) == 1
     assert events[0]['source'] == 'cableway_fault'
 
@@ -48,7 +48,7 @@ def test_cableway_fault_alarm_is_edge_triggered(session) -> None:
     assert events2 == []
 
 
-def test_cableway_output_alarm_keys(session) -> None:
+def test_cableway_output_flags_do_not_create_fault_alarms(session) -> None:
     service = DataService(session)
     timestamp = datetime(2024, 1, 1, 0, 0, 1)
 
@@ -67,6 +67,5 @@ def test_cableway_output_alarm_keys(session) -> None:
     )
 
     alarms = session.exec(select(AlarmRecord.sensor_name)).all()
-    assert '心跳超时' in alarms
-    assert 'Q故障' in alarms
-    assert len(events) == 2
+    assert alarms == []
+    assert events == []

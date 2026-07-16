@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine, select
@@ -10,7 +10,7 @@ from app.db.models import RFIDData, SensorData
 from app.mqtt import MQTTMessageContext
 from app.runtime.db_worker import DBWorker
 from app.services.data_service import SENSOR_VALUE_FIELDS
-from app.services.ingestion import handle_rfid_payload, handle_sensor_payload
+from app.services.ingestion import handle_rfid_payload, handle_sensor_payload, _sensor_write_buffer, _buffer_lock
 
 
 def _build_context(payload: object) -> MQTTMessageContext:
@@ -167,7 +167,7 @@ def test_handle_sensor_payload_does_not_backfill_stale_previous_row(monkeypatch)
     )
     SQLModel.metadata.create_all(engine)
     monkeypatch.setattr("app.runtime.db_worker.engine", engine)
-    monkeypatch.setattr("app.services.ingestion.get_settings", lambda: type("S", (), {"prefer_payload_device_id": False, "sensor_backfill_max_age_seconds": 5.0})())
+    monkeypatch.setattr("app.services.ingestion.get_settings", lambda: type("S", (), {"prefer_payload_device_id": False, "sensor_backfill_max_age_seconds": 5.0, "wait_for_all_sensors": False, "sensor_group_timeout_seconds": 5.0})())
 
     worker = DBWorker(name="test-db-worker")
     worker.start()
@@ -287,4 +287,69 @@ def test_handle_rfid_payload_accepts_list_payload(monkeypatch):
         assert rows[0].card_id == "aa bb"
         assert rows[1].card_id == "cc dd"
     finally:
+        worker.stop()
+
+
+def test_handle_sensor_payload_buffered_waits_for_all_fields(monkeypatch):
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    monkeypatch.setattr("app.runtime.db_worker.engine", engine)
+    monkeypatch.setattr(
+        "app.services.ingestion.get_settings",
+        lambda: type(
+            "S",
+            (),
+            {
+                "prefer_payload_device_id": False,
+                "sensor_backfill_max_age_seconds": 12.0,
+                "wait_for_all_sensors": True,
+                "sensor_group_timeout_seconds": 60.0,
+            },
+        )(),
+    )
+    with _buffer_lock:
+        _sensor_write_buffer.clear()
+
+    worker = DBWorker(name="test-db-worker")
+    worker.start()
+    try:
+        # First message: only temperature + co
+        payload_1 = [
+            {"sensor_type": "temperature", "value": 25.0, "timestamp": "2026-05-22T10:00:00+08:00"},
+            {"sensor_type": "co", "value": 3.5, "timestamp": "2026-05-22T10:00:00+08:00"},
+        ]
+        handle_sensor_payload(_build_context(payload_1), db_worker=worker)
+        with Session(engine) as session:
+            rows = session.exec(select(SensorData)).all()
+        assert len(rows) == 0, "Should not write when incomplete"
+
+        # Second message: remaining fields
+        payload_2 = [
+            {"sensor_type": "humidity", "value": 60.0},
+            {"sensor_type": "pressure", "value": 1013.0},
+            {"sensor_type": "smoke", "value": 0.1},
+            {"sensor_type": "o2", "value": 20.9},
+            {"sensor_type": "h2s", "value": 0.0},
+            {"sensor_type": "ch4", "value": 0.0},
+        ]
+        handle_sensor_payload(_build_context(payload_2), db_worker=worker)
+        with Session(engine) as session:
+            rows = session.exec(select(SensorData)).all()
+        assert len(rows) == 1, "Should write when all fields present"
+        row = rows[0]
+        assert row.temperature == 25.0
+        assert row.co == 3.5
+        assert row.humidity == 60.0
+        assert row.pressure == 1013.0
+        assert row.smoke == 0.1
+        assert row.o2 == 20.9
+        assert row.h2s == 0.0
+        assert row.ch4 == 0.0
+    finally:
+        with _buffer_lock:
+            _sensor_write_buffer.clear()
         worker.stop()
